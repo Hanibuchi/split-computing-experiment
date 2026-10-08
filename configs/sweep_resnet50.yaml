@@ -1,0 +1,59 @@
+# =====================================================================
+# scripts/sweep.py 用の設定例
+#   ResNet-50 を「分割点 × 圧縮方式 × 通信路」の全組み合わせで評価する。
+#   各項目の詳しい意味は src/splitcomp/config.py の SweepConfig を参照。
+#
+#   実行: python scripts/sweep.py --config configs/sweep_resnet50.yaml
+#   一部だけ変更: ... model.name=resnet18 data.num_samples=8
+# =====================================================================
+
+experiment_name: sweep_resnet50   # 出力ディレクトリ名 runs/<これ>_<日時>/
+output_dir: runs
+seed: 0
+warmup: 3                         # 計測前の空回し回数
+
+model:
+  name: resnet50                  # torchvision のモデル名 / "timm:名前" / 登録した独自モデル名
+  pretrained: false               # true で ImageNet 学習済み重み（初回はダウンロード）
+  trace_depth: 1                  # 1: layer1, layer2 ... 単位の粗い分割点 / null: 全ての層
+  kwargs: {}                      # モデル構築時の追加引数（例: {num_classes: 10}）
+
+data:
+  name: random                    # random: ダミーデータ / imagefolder: ImageNet 形式 / cifar10
+  root: ./data                    # データの場所（random 以外）
+  split: val
+  num_samples: 32                 # 評価に使うサンプル数（null で全件）
+  batch_size: 1                   # 1 枚ずつ送るのがレイテンシ評価としては現実的
+  kwargs:
+    input_shape: [3, 224, 224]    # random のときの入力の形
+    num_classes: 1000
+
+devices:
+  head: cpu                       # 端末側（非力な端末を想定して CPU）
+  tail: auto                      # サーバ側（cuda → mps → cpu の順に自動選択）
+
+# 評価する分割点: "clean"（送信テンソルが 1 つの点すべて）/ "all" / 名前のリスト
+#   名前は python scripts/list_splits.py --config configs/sweep_resnet50.yaml で確認できる
+#   "input" = 入力をそのまま送る（全てサーバで処理）, "output" = 全て端末で処理
+split_points: [input, maxpool, layer1, layer2, layer3, layer4, output]
+
+# 比較する圧縮方式
+#   tensor: raw（量子化なし）/ quant（一様量子化）
+#   dtype : raw のときの送信データ型 float32 / float16 / bfloat16
+#   bits  : quant のビット数（1〜16）, per_channel: チャネルごとに量子化範囲を決める
+#   compress: 後段の可逆圧縮 [zlib] / [lz4] / []
+codecs:
+  - {tensor: raw, dtype: float32}
+  - {tensor: raw, dtype: float16}
+  - {tensor: quant, bits: 8}
+  - {tensor: quant, bits: 8, compress: [zlib]}
+  - {tensor: quant, bits: 4, per_channel: true, compress: [zlib]}
+
+# シミュレーションする通信路（帯域 [Mbit/s], 往復遅延 RTT [ms]）
+channels:
+  - {name: LTE, bandwidth_mbps: 10, rtt_ms: 50}
+  - {name: WiFi, bandwidth_mbps: 50, rtt_ms: 10}
+  - {name: 5G, bandwidth_mbps: 200, rtt_ms: 10}
+
+# 学習済みボトルネックを使う場合はチェックポイントを指定（分割点はチェックポイントのものになる）
+bottleneck_ckpt: null

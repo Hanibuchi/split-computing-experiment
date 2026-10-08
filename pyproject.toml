@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "splitcomp"
+version = "0.1.0"
+description = "Split computing 研究のための汎用実験基盤 (PyTorch)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "numpy",
+    "pyyaml",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# lz4 圧縮を使う場合
+lz4 = ["lz4"]
+# timm のモデルを使う場合
+timm = ["timm"]
+dev = ["pytest", "lz4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

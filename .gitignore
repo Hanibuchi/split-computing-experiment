@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# split computing 実験の出力・データ
+runs/
+data/
+checkpoints/

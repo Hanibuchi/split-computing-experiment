@@ -1,0 +1,59 @@
+# =====================================================================
+# scripts/train_bottleneck.py 用の設定例
+#   ResNet-18 の layer2 の後ろにボトルネックを挿入し、元モデルからの蒸留で学習する。
+#   各項目の詳しい意味は src/splitcomp/config.py の TrainConfig を参照。
+#
+#   実行: python scripts/train_bottleneck.py --config configs/train_bottleneck.yaml
+#   ※ 既定は動作確認用のダミーデータ。実際の研究では data を ImageNet 等に変え、
+#     model.pretrained: true にすること。
+# =====================================================================
+
+experiment_name: bottleneck_resnet18_layer2
+output_dir: runs
+seed: 0
+device: auto                      # cuda → mps → cpu の順に自動選択
+
+model:
+  name: resnet18
+  pretrained: false               # 実験では true（学習済みモデルを教師にする）
+  trace_depth: 1                  # 分割点を layer1, layer2 ... の単位で指定するため
+  kwargs: {}
+
+split_point: layer2               # ボトルネックを挿入する分割点（送信テンソルが 1 つの点のみ可）
+
+bottleneck:
+  channels: 12                    # 送信する特徴のチャネル数（layer2 の出力は 128ch）
+  downsample: 2                   # 空間方向の縮小率（28x28 → 14x14）
+  hidden_channels: null           # 中間層のチャネル数（null で入力と同じ）
+
+freeze_head: true                 # head の重みを固定（端末側のモデルは元のまま）
+freeze_tail: true                 # tail の重みを固定（false にすると tail も微調整）
+
+epochs: 2
+max_steps: 20                     # 1 エポックの最大ステップ数（null で全データ）。動作確認用に小さくしている
+lr: 1.0e-3
+weight_decay: 0.0
+log_interval: 10
+
+# 損失 = distill_weight * 蒸留 + task_weight * タスク損失 + rate_weight * mean(|z|)
+distill: feature                  # feature（特徴の MSE）/ kl（出力分布の KL）/ mse（出力の MSE）/ none
+distill_weight: 1.0
+temperature: 1.0                  # distill: kl のときの温度
+task_loss: null                   # null / cross_entropy / mse（正解ラベルを使う場合）
+task_weight: 0.0
+rate_weight: 0.0                  # >0 で z を疎にして圧縮しやすくする
+
+data:                             # 学習データ
+  name: random
+  split: train
+  num_samples: 640
+  batch_size: 32
+  shuffle: true
+  kwargs: {input_shape: [3, 224, 224], num_classes: 1000}
+
+val_data:                         # 検証データ（null で検証しない）
+  name: random
+  split: val
+  num_samples: 64
+  batch_size: 32
+  kwargs: {input_shape: [3, 224, 224], num_classes: 1000, seed: 12345}
