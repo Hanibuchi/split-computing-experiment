@@ -130,6 +130,55 @@ plt.xscale("log"); plt.xlabel("送信データ量 [KB/バッチ]"); plt.ylabel("
 
 ---
 
+## レシピ 5: 動画の時系列符号化（Delta coding）をパケットロス下で評価する
+
+Shiba et al., "Delta Coding With Dead-Zone Quantization for Bandwidth-Efficient Split Computing on
+Video Streams"（IEEE Access 2026）の方式を、パケットロスのある通信路で評価します。
+同論文では、パケットロスは今後の課題とされています（§VII-E-5）。
+
+1. `pip install -e ".[video]"` で PyAV を入れる。UCF-101 は手で用意しなくてよい。初回実行時に、使う 30 本だけ
+   （約 15MB）が HuggingFace の ZIP ミラーから `./data/UCF-101/<クラス名>/` に自動でダウンロードされる
+   （7GB 全体は落とさない）
+2. 動作確認:
+   `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'`
+3. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
+
+使う動画（`selection: paper`、`src/splitcomp/data/ucf101.py` の `PAPER_CLIPS`）:
+- 論文には「UCF-101 の 5 カテゴリにまたがる 30 クリップ・各 30 連続フレーム」としか書かれておらず、
+  具体的なリストは公開されていない。そこで次の方針で選んだ（推測）
+  - カテゴリのクラス数に比例して配分: Human–Object 6 / Body-Motion 5 / Human–Human 1 / Instruments 3 / Sports 15
+  - 論文が例に挙げている Typing と Basketball は必ず含める。残りは seed=0 で選ぶ
+  - 各クラスの `v_<クラス名>_g01_c01.avi`（公式 split 1 のテスト側）の先頭 30 フレームを使う
+- `selection: random` にすると、`seed` で選んだ別のクリップの組で頑健性を確かめられる
+
+モデル:
+- GoP（`gop` フレーム）の先頭が I フレーム（特徴を対称量子化）、残りが P フレーム
+- P フレームで送るもの: FD は特徴そのもの、DwD は真の差分、DPCM は予測残差
+- 量子化インデックスは b ビット固定長で、MTU ごとのパケットに分割する（各パケット単体で復号できる）
+- 損失モデル（`losses`）: `bernoulli` / `gilbert_elliott`（`burst_len`）/ `frame`
+- 届かなかった要素は `concealment` で補う。`hold` は直前の値（P フレームでは差分 0 と同じ）、`zero` は 0
+- 端末はロスを知らない。そのため DPCM では、ロスによる端末とクラウドの状態のずれが次の I フレームまで残る
+
+出力:
+- `results.csv`: 条件（モデル × 方式 × ビット数 × 損失）ごとに、`agreement`（量子化・ロスなしの元モデルとの
+  top-1 一致率）、`agreement_ci95`、`agreement_drop`（同じ方式のロスなしとの差）、`feature_mse`、
+  `loss_rate`（実際のパケット損失率）、`bytes_per_frame`、`entropy_bpe`
+- `gop_curve.csv`: GoP 内の位置ごとの `agreement` / `feature_mse`。ロスの伝搬が見える
+
+```python
+import pandas as pd
+df = pd.read_csv("runs/<実行ディレクトリ>/results.csv")
+print(df[df.loss_model != "frame"].pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement"))
+```
+
+確認ポイント:
+- `loss_p = 0` の行は、論文 Table 8 の FD / DPCM の値とおおむね一致するはず（クリップの選び方の違いで多少ずれる）
+- D+DZ（DPCM）が F+Sym（FD）を下回り始める損失率
+- `gop_curve.csv` で、ロス後に誤差が GoP の終わりまで残るか
+- `gop` を短くしたとき（`gop=10` など）の、ロス耐性と送信量のトレードオフ
+
+---
+
 ## 再現性のためのチェックリスト
 
 - [ ] 実行ディレクトリの `config.yaml` と `meta.json` を論文の実験記録と紐づけたか

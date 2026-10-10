@@ -146,6 +146,47 @@ class BottleneckConfig:
     hidden_channels: int | None = None
 
 
+@dataclass
+class LossConfig:
+    """パケットロスのモデルの設定（splitcomp.temporal.packet 参照）。"""
+
+    #: "bernoulli"（独立）/ "gilbert_elliott"（バースト）/ "frame"（フレーム単位の全損失）。
+    name: str = "bernoulli"
+    #: 平均損失率（frame ではフレームが落ちる確率）。
+    p: float = 0.0
+    #: gilbert_elliott の平均バースト長 [パケット]。
+    burst_len: float = 4.0
+    #: 結果 CSV の loss 列に出す表示名。空なら "bernoulli(p=0.05)" のように自動生成。
+    label: str = ""
+
+    def display_name(self) -> str:
+        if self.label:
+            return self.label
+        if self.name == "gilbert_elliott":
+            return f"{self.name}(p={self.p:g},L={self.burst_len:g})"
+        return f"{self.name}(p={self.p:g})"
+
+
+@dataclass
+class TemporalSchemeConfig:
+    """時系列符号化の方式（splitcomp.temporal.coding 参照）。"""
+
+    #: 結果 CSV の scheme 列に出す表示名（例: "D+DZ"）。
+    name: str = "D+DZ"
+    #: "fd"（毎フレーム独立）/ "dwd"（真の差分・ドリフトあり）/ "dpcm"（予測残差）。
+    scheme: str = "dpcm"
+    #: P フレームの量子化方式。"sym"（対称）/ "dz"（dead-zone）。I フレームは常に対称。
+    p_quant: str = "dz"
+
+
+@dataclass
+class SplitTarget:
+    """評価するモデルと分割点の組。"""
+
+    model: ModelConfig = field(default_factory=ModelConfig)
+    split_point: str = "layer2"
+
+
 # ---------------------------------------------------------------------------
 # スクリプトごとの設定
 # ---------------------------------------------------------------------------
@@ -244,6 +285,36 @@ class NetworkConfig:
     port: int = 50051
     warmup: int = 3
     bottleneck_ckpt: str | None = None
+
+
+@dataclass
+class PacketLossConfig:
+    """scripts/packet_loss_sweep.py 用: 動画の時系列符号化（FD / DwD / DPCM）をパケットロス下で評価する。"""
+
+    experiment_name: str = "packet_loss"
+    output_dir: str = "runs"
+    seed: int = 0
+    #: 評価する (モデル, 分割点) のリスト。分割点は送信テンソルが 1 つの点（clean）であること。
+    targets: list[SplitTarget] = field(default_factory=lambda: [SplitTarget()])
+    #: 動画データ。各要素が (frames[T, 3, H, W], label) のデータセット（例: ucf101）。
+    data: DataConfig = field(default_factory=lambda: DataConfig(name="ucf101", root="./data", num_samples=None))
+    devices: DeviceConfig = field(default_factory=DeviceConfig)
+    #: 比較する時系列符号化の方式。
+    schemes: list[TemporalSchemeConfig] = field(default_factory=lambda: [TemporalSchemeConfig()])
+    #: 量子化ビット数のリスト。
+    bits: list[int] = field(default_factory=lambda: [4])
+    #: GoP 長 K（I フレームの間隔）。
+    gop: int = 30
+    #: 1 パケットの最大サイズ [バイト]（アプリケーション層のヘッダ込み）。
+    mtu: int = 1400
+    #: true で要素をパケットに交互に振り分ける（ロスを空間的に分散させる）。
+    interleave: bool = False
+    #: 届かなかった要素の補い方。"hold"（直前の値）/ "zero"。
+    concealment: str = "hold"
+    #: 比較する損失モデルのリスト。
+    losses: list[LossConfig] = field(default_factory=lambda: [LossConfig()])
+    #: 損失パターンの乱数シード（損失率 0 の条件は 1 回だけ実行する）。
+    seeds: list[int] = field(default_factory=lambda: [0])
 
 
 # ---------------------------------------------------------------------------

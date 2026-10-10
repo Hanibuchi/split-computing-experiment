@@ -29,6 +29,8 @@ src/splitcomp/
 ├── utils.py             デバイス選択、乱数シード、表の整形など
 ├── models/registry.py   build_model / register_model（torchvision・timm・独自モデル）
 ├── data/registry.py     build_dataset / build_dataloader / register_dataset
+├── data/ucf101.py       UCF101Clips（動画クリップ）
+├── temporal/            動画の時系列符号化（FD / DwD / DPCM, dead-zone 量子化）とパケットロス
 ├── split/
 │   ├── splitter.py      Splitter（分割点の列挙と分割）, split_sequential（簡易版）
 │   └── pipeline.py      SplitPipeline, Backend, LocalBackend

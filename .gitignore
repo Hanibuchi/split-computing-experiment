@@ -221,5 +221,8 @@ __marimo__/
 
 # split computing 実験の出力・データ
 runs/
-data/
+/data/
 checkpoints/
+
+# 論文 PDF（著作権のため管理しない）
+docs/*.pdf

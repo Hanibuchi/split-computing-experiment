@@ -21,6 +21,8 @@ dependencies = [
 lz4 = ["lz4"]
 # timm のモデルを使う場合
 timm = ["timm"]
+# 動画（UCF-101 など）を読む場合
+video = ["av"]
 dev = ["pytest", "lz4"]
 
 [tool.setuptools.packages.find]
