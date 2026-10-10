@@ -1,0 +1,41 @@
+# =====================================================================
+# scripts/serve.py と scripts/client.py 用の設定例（実ネットワーク実験）
+#   サーバとクライアントで「同じ」設定ファイルを使うこと
+#   （モデル・分割点・圧縮方式が一致しないと接続を拒否する）。
+#
+#   サーバ:     python scripts/serve.py  --config configs/network.yaml host=0.0.0.0
+#   クライアント: python scripts/client.py --config configs/network.yaml host=<サーバのIP>
+# =====================================================================
+
+experiment_name: network_resnet18
+output_dir: runs
+seed: 0
+warmup: 3
+
+host: 127.0.0.1                   # クライアント: 接続先 / サーバ: 待ち受けアドレス（0.0.0.0 で全て）
+port: 50051
+
+model:
+  name: resnet18
+  pretrained: false
+  trace_depth: 1
+  kwargs: {}
+
+split_point: layer2               # 分割点（scripts/list_splits.py で確認）
+
+codec:                            # 送信時の圧縮方式（sweep の codecs の 1 要素と同じ書き方）
+  tensor: quant
+  bits: 8
+  compress: [zlib]
+
+devices:
+  head: cpu                       # クライアント（端末）側で head を動かすデバイス
+  tail: auto                      # サーバ側で tail を動かすデバイス
+
+data:                             # クライアントが送るデータ
+  name: random
+  num_samples: 32
+  batch_size: 1
+  kwargs: {input_shape: [3, 224, 224], num_classes: 1000}
+
+bottleneck_ckpt: null             # 学習済みボトルネックを使う場合はパスを指定（両側で同じファイル）

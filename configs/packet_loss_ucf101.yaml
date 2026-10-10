@@ -1,0 +1,67 @@
+# =====================================================================
+# scripts/packet_loss_sweep.py 用の設定
+#   Shiba et al. (IEEE Access 2026) の Delta coding + dead-zone 量子化を、
+#   パケットロスのある通信路で評価する。各項目の意味は src/splitcomp/config.py の PacketLossConfig を参照。
+#
+#   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
+#   動作確認: ... data.kwargs.num_clips=2 'seeds=[0]'
+# =====================================================================
+
+experiment_name: packet_loss_ucf101
+output_dir: runs
+seed: 0
+
+# 論文 Fig.5 の代表 4 条件（形状は論文 Table 3 と同じ）
+targets:
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_4}   # S4: 128x14x14
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # L2: 512x28x28
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 16: 256x28x28
+  - {model: {name: mobilenet_v2, pretrained: true, trace_depth: 2}, split_point: features_14}       # S14: 160x7x7
+
+data:
+  name: ucf101
+  root: ./data            # 使う動画は初回実行時に ./data/UCF-101/<クラス名>/ へ自動でダウンロードされる（30 本・約 15MB）
+  split: test             # （ucf101 では未使用）
+  num_samples: null
+  kwargs:
+    selection: paper      # paper: 論文相当の 30 本（src/splitcomp/data/ucf101.py の PAPER_CLIPS）/ random: seed で選ぶ
+    num_clips: null       # null で 30 本全て。2 などにすると先頭 N 本だけ（動作確認用）
+    clip_len: 30          # 30 フレーム = GoP 1 個分
+    frame_step: 1         # 2 にすると時間間隔 2 倍（論文の 15fps 実験）
+    size: 224
+    download: true        # 手元に無い動画を HuggingFace のミラーから取得する
+
+devices:
+  head: auto
+  tail: auto
+
+# 比較する方式（論文の F+Sym / D+Sym / D+DZ と、ドリフトありの DwD）
+schemes:
+  - {name: F+Sym, scheme: fd, p_quant: sym}
+  - {name: DwD+Sym, scheme: dwd, p_quant: sym}
+  - {name: D+Sym, scheme: dpcm, p_quant: sym}
+  - {name: D+DZ, scheme: dpcm, p_quant: dz}
+
+bits: [2, 4, 8]
+gop: 30
+mtu: 1400                 # パケットのサイズ上限 [バイト]（ヘッダ 17 バイト込み）
+interleave: false         # true で要素をパケットに交互に振り分ける
+concealment: hold         # 届かなかった要素: hold（直前の値）/ zero
+
+losses:
+  - {name: bernoulli, p: 0.0, label: no_loss}
+  - {name: bernoulli, p: 0.01}
+  - {name: bernoulli, p: 0.02}
+  - {name: bernoulli, p: 0.05}
+  - {name: bernoulli, p: 0.1}
+  - {name: bernoulli, p: 0.2}
+  - {name: gilbert_elliott, p: 0.01, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.02, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.05, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.1, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.2, burst_len: 4}
+  - {name: frame, p: 0.01}
+  - {name: frame, p: 0.05}
+  - {name: frame, p: 0.1}
+
+seeds: [0, 1, 2]
