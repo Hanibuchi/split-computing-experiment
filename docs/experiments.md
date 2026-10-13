@@ -142,7 +142,26 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
 2. 動作確認:
    `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'`
 3. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
-   （全 4 モデルで数時間かかる。ssh で動かすなら tmux の中で）
+   （時間がかかるので、ssh で動かすなら tmux の中で）
+
+実行時間について:
+- 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー）は損失条件によらないので、
+  クリップごとに (方式, ビット数) ごとに 1 回だけ行い、全ての損失条件・シード（既定の設定で 40 通り）で使い回す。
+  以前は損失条件ごとに符号化し直していた。結果は以前の版と完全に一致する（`tests/test_temporal.py` で確認している）。
+  ResNet50/layer2 相当の特徴で、CPU 側の処理が約 10 倍速くなる
+- 符号化・復号は CPU で行い、GPU は tail だけに使う
+- torch の CPU スレッド数は、ジョブに割り当てられたコア数（`os.sched_getaffinity`）を超えないように自動で調整する
+  （torch の既定はマシン全体のコア数なので、割り当てが一部だけだとスレッドが多すぎて遅くなる）。
+  使ったスレッド数は起動時に表示され、`meta.json` の `cpu_threads` に残る。手動で決めたいときは `OMP_NUM_THREADS=8 python ...`
+- GPU が 2 枚あるなら、モデルを分けて 2 プロセスを並列に動かせる（あとで `merge_results.py` でまとめる）。
+  速い GPU に重いモデル（vgg16, resnet50）を割り当てる。CPU コアは 2 プロセスで分け合うことになる:
+
+  ```bash
+  python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50 --target vgg16 devices.head=cuda:0 devices.tail=cuda:0
+  python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target efficientnet_v2_s --target mobilenet_v2 devices.head=cuda:1 devices.tail=cuda:1
+  ```
+
+  どちらが `cuda:0` かは `nvidia-smi` で確認する（`CUDA_DEVICE_ORDER=PCI_BUS_ID` を付けると `nvidia-smi` と同じ番号になる）
 
 時間制限のある計算機（時間を指定して借りる JupyterLab など）では、モデルごとに別々に実行して、あとでまとめる:
 
