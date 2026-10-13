@@ -8,6 +8,10 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 を行い、量子化もロスもない元モデルの出力との top-1 一致率（agreement）などを集計する。
 端末はロスを知らない（フィードバックなし）ので、DPCM のロスは次の I フレームまで伝搬する。
 
+端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー）はロスによらないので、
+クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
+torch の CPU スレッド数は、ジョブに割り当てられたコア数（os.sched_getaffinity）を超えないように調整する。
+
 出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
     gop_curve.csv  GoP 内の位置 t ごとの agreement と特徴 MSE（誤差伝搬の様子）
@@ -86,26 +90,58 @@ def _clip_seed(seed: int, clip: int) -> int:
     return seed * 100_003 + clip
 
 
-@torch.no_grad()
-def run_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, acc: _Accumulator) -> None:
-    """1 クリップを符号化 → ロス → 復号して tail を通し、acc に加算する。"""
-    T = feats.shape[0]
+class EncodedClip:
+    """1 クリップを端末側で符号化した結果（損失条件によらないので、全ての損失条件で使い回す）。"""
+
+    def __init__(self, frames: list, entropy: list[float], frame_bytes: int, assign: torch.Tensor, num_packets: int):
+        #: フレームごとの送信内容（EncodedFrame）
+        self.frames = frames
+        #: フレームごとのエントロピー [bit/要素]
+        self.entropy = entropy
+        #: 1 フレームの送信バイト数（ヘッダ込み）
+        self.frame_bytes = frame_bytes
+        #: 各要素が入るパケットの番号
+        self.assign = assign
+        #: 1 フレームのパケット数
+        self.num_packets = num_packets
+
+
+def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
+    """1 クリップ（T フレーム）を端末側で符号化する（I/P の判定・差分の計算・量子化）。
+
+    端末はロスを知らないので、結果は損失モデル・シードによらない。
+    """
     n = feats[0].numel()
-    assign = packet_assignment(n, bits, cfg.mtu, cfg.interleave)
-    P = num_packets(n, bits, cfg.mtu)
-    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
     enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
+    frames = [enc.encode(feats[t]) for t in range(feats.shape[0])]
+    return EncodedClip(
+        frames,
+        entropy=[entropy_bits(f.idx) for f in frames],
+        frame_bytes=frame_bytes(n, bits, cfg.mtu),
+        assign=packet_assignment(n, bits, cfg.mtu, cfg.interleave),
+        num_packets=num_packets(n, bits, cfg.mtu),
+    )
+
+
+@torch.no_grad()
+def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, acc: _Accumulator) -> None:
+    """符号化済みの 1 クリップにロスを起こして復号し、tail を通して acc に加算する。
+
+    損失の乱数はクリップとシードで決まり、フレームごとに drop を 1 回呼ぶので、条件ごとに独立に再現できる。
+    """
+    T = len(encoded.frames)
+    P = encoded.num_packets
+    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
     dec = TemporalDecoder(cfg.concealment)
 
     recon = torch.empty_like(feats)
-    for t in range(T):
-        frame = enc.encode(feats[t])
+    for t, frame in enumerate(encoded.frames):
         lost = loss.drop(P)
-        recon[t] = dec.decode(frame, received_mask(lost, assign) if lost.any() else None)
+        recon[t] = dec.decode(frame, received_mask(lost, encoded.assign) if lost.any() else None)
         acc.lost_packets += int(lost.sum())
-        acc.packets += P
-        acc.bytes += frame_bytes(n, bits, cfg.mtu)
-        acc.entropy += entropy_bits(frame.idx)
+        acc.entropy += encoded.entropy[t]  # 以前の版と同じ順に足す（浮動小数点の和を一致させるため）
+    acc.packets += P * T
+    acc.bytes += encoded.frame_bytes * T
 
     pred = tail(recon.to(tail_dev)).argmax(-1).cpu()
     agree = (pred == ref_pred).double()
@@ -117,6 +153,19 @@ def run_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed,
     np.add.at(acc.pos_agree, pos.numpy(), agree.numpy())
     np.add.at(acc.pos_mse, pos.numpy(), mse.numpy())
     np.add.at(acc.pos_count, pos.numpy(), 1)
+
+
+def limit_cpu_threads() -> int:
+    """torch の CPU スレッド数を、このプロセスに割り当てられたコア数以下にして、使うスレッド数を返す。
+
+    torch の既定はマシン全体の物理コア数なので、ジョブに一部のコアしか割り当てられていないと
+    スレッドが多すぎて遅くなる。os.sched_getaffinity が無い環境（macOS など）では何もしない。
+    """
+    if hasattr(os, "sched_getaffinity"):
+        n = len(os.sched_getaffinity(0))
+        if torch.get_num_threads() > n:
+            torch.set_num_threads(n)
+    return torch.get_num_threads()
 
 
 def target_name(target) -> str:
@@ -259,6 +308,8 @@ def main() -> None:
     if not args.resume:
         cfg.targets = select_targets(cfg.targets, args.target)
     set_seed(cfg.seed)
+    threads = limit_cpu_threads()
+    print(f"CPU スレッド数: {threads}")
     head_dev, tail_dev = resolve_device(cfg.devices.head), resolve_device(cfg.devices.tail)
     done: set[str] = set()
     if args.resume:
@@ -276,7 +327,7 @@ def main() -> None:
         if args.target:
             name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
         run_dir = make_run_dir(cfg.output_dir, name)
-        save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev)})
+        save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev), "cpu_threads": threads})
         print(f"結果の保存先: {run_dir}")
     print(f"途中で止まったら次のコマンドで再開できます: python scripts/packet_loss_sweep.py --resume {run_dir}")
 
@@ -321,9 +372,12 @@ def main() -> None:
                 feats = feats.float().cpu()
                 for scheme in cfg.schemes:
                     for bits in cfg.bits:
+                        # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す
+                        encoded = encode_clip(feats, cfg, scheme, bits)
                         for loss_cfg, seed in conditions:
                             key = (scheme.name, bits, loss_cfg.display_name(), seed)
-                            run_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, accs[key])
+                            decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key])
+                        del encoded
                 shape = list(feats.shape[1:])
                 save_checkpoint(run_dir, target, clip + 1, len(dataset), shape, accs)
                 print(f"  クリップ {clip + 1}/{len(dataset)} 完了（経過 {time.perf_counter() - started:.0f} 秒）", flush=True)
