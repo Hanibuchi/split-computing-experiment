@@ -216,6 +216,13 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
   `loss_rate`（実際のパケット損失率）、`bytes_per_frame`、`entropy_bpe`
 - `gop_curve.csv`: GoP 内の位置ごとの `agreement` / `feature_mse`。ロスの伝搬が見える
 
+図と要約表は `packet_loss_plot.py` で作れる（`pip install -e ".[analysis]"` が必要）。上の 2 つから、
+損失率ごとの一致率・DPCM と FD の差・GoP 内の伝搬などの PNG と `summary.md` を `<実行フォルダ>/figures/` に書き出す:
+
+```bash
+python scripts/packet_loss_plot.py runs/packet_loss_ucf101_merged
+```
+
 ```python
 import pandas as pd
 df = pd.read_csv("runs/<実行ディレクトリ>/results.csv")

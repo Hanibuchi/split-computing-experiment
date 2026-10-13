@@ -23,6 +23,8 @@ lz4 = ["lz4"]
 timm = ["timm"]
 # 動画（UCF-101 など）を読む場合
 video = ["av"]
+# 結果の可視化（scripts/packet_loss_plot.py）
+analysis = ["pandas", "matplotlib"]
 dev = ["pytest", "lz4"]
 
 [tool.setuptools.packages.find]
