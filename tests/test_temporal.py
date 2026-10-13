@@ -424,3 +424,88 @@ def test_resume_config(tmp_path):
     assert cfg.bits == [2, 8] and cfg.devices.head == "cpu"
     with pytest.raises(SystemExit, match="devices"):
         sweep.resume_config(tmp_path, ["bits=[4]"])
+
+
+def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cfg, seed, clip, acc):
+    """高速化する前の run_clip（損失条件ごとに符号化し直す版）。新しい encode_clip / decode_clip との一致確認用。"""
+    import numpy as np
+
+    from splitcomp.temporal import (
+        TemporalDecoder,
+        TemporalEncoder,
+        build_loss_model,
+        entropy_bits,
+        frame_bytes,
+        num_packets,
+        packet_assignment,
+        received_mask,
+    )
+
+    T = feats.shape[0]
+    n = feats[0].numel()
+    assign = packet_assignment(n, bits, cfg.mtu, cfg.interleave)
+    P = num_packets(n, bits, cfg.mtu)
+    loss = build_loss_model(loss_cfg, sweep._clip_seed(seed, clip))
+    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
+    dec = TemporalDecoder(cfg.concealment)
+    recon = torch.empty_like(feats)
+    for t in range(T):
+        frame = enc.encode(feats[t])
+        lost = loss.drop(P)
+        recon[t] = dec.decode(frame, received_mask(lost, assign) if lost.any() else None)
+        acc.lost_packets += int(lost.sum())
+        acc.packets += P
+        acc.bytes += frame_bytes(n, bits, cfg.mtu)
+        acc.entropy += entropy_bits(frame.idx)
+    pred = tail(recon).argmax(-1)
+    agree = (pred == ref_pred).double()
+    mse = (recon - feats).pow(2).flatten(1).mean(1).double()
+    pos = torch.arange(T) % cfg.gop
+    acc.agree += int(agree.sum())
+    acc.frames += T
+    acc.mse += float(mse.sum())
+    np.add.at(acc.pos_agree, pos.numpy(), agree.numpy())
+    np.add.at(acc.pos_mse, pos.numpy(), mse.numpy())
+    np.add.at(acc.pos_count, pos.numpy(), 1)
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+def test_encode_once_matches_reference(interleave):
+    """符号化を損失条件で使い回しても、条件ごとに符号化し直す以前の版と集計値が完全に一致する。"""
+    import numpy as np
+
+    from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    schemes = [
+        TemporalSchemeConfig("F+Sym", "fd", "sym"),
+        TemporalSchemeConfig("DwD+Sym", "dwd", "sym"),
+        TemporalSchemeConfig("D+DZ", "dpcm", "dz"),
+    ]
+    losses = [
+        LossConfig("bernoulli", 0.0),
+        LossConfig("bernoulli", 0.1),
+        LossConfig("gilbert_elliott", 0.1, burst_len=3),
+        LossConfig("frame", 0.2),
+    ]
+    # MTU を小さくして 1 フレームを複数パケットに分ける
+    cfg = PacketLossConfig(schemes=schemes, bits=[2, 8], gop=5, mtu=60, interleave=interleave, losses=losses, seeds=[0, 1])
+    torch.manual_seed(0)
+    tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
+    for clip in range(2):
+        feats = torch.randn(12, 8, 7, 7).cumsum(0)  # 時間方向に相関のある特徴
+        ref_pred = tail(feats).argmax(-1)
+        for scheme in schemes:
+            for bits in cfg.bits:
+                encoded = sweep.encode_clip(feats, cfg, scheme, bits)
+                for loss_cfg in losses:
+                    for seed in cfg.seeds:
+                        new, old = sweep._Accumulator(cfg.gop), sweep._Accumulator(cfg.gop)
+                        sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, seed, clip, new)
+                        _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cfg, seed, clip, old)
+                        for k, v in vars(old).items():
+                            got = vars(new)[k]
+                            if isinstance(v, np.ndarray):
+                                assert np.array_equal(got, v), k
+                            else:
+                                assert got == v, k
