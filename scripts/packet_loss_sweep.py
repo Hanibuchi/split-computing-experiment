@@ -8,13 +8,18 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 を行い、量子化もロスもない元モデルの出力との top-1 一致率（agreement）などを集計する。
 端末はロスを知らない（フィードバックなし）ので、DPCM のロスは次の I フレームまで伝搬する。
 
-出力（runs/<実験名>_<日時>/）:
+出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
     gop_curve.csv  GoP 内の位置 t ごとの agreement と特徴 MSE（誤差伝搬の様子）
+    *.jsonl        同じ内容。モデル 1 つ分が終わるたびに追記されるので、途中で止まっても終わった分は残る
 
 例:
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'
+
+    # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50
 """
 
 from __future__ import annotations
@@ -98,11 +103,48 @@ def run_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed,
     np.add.at(acc.pos_count, pos.numpy(), 1)
 
 
+def target_name(target) -> str:
+    return f"{target.model.name}/{target.split_point}"
+
+
+def select_targets(targets: list, names: list[str] | None) -> list:
+    """names（モデル名・「モデル名/分割点」・0 始まりの番号）に一致する target を、設定ファイルの順で返す。
+
+    names が空なら全ての target を返す。一致しない名前があればエラーにする。
+    """
+    if not names:
+        return list(targets)
+    chosen = set()
+    for name in names:
+        if name.isdigit() and int(name) < len(targets):
+            hits = [int(name)]
+        else:
+            hits = [i for i, t in enumerate(targets) if name in (t.model.name, target_name(t))]
+        if not hits:
+            candidates = ", ".join(f"{i}: {target_name(t)}" for i, t in enumerate(targets))
+            raise SystemExit(f"--target {name!r} に一致する target がありません。候補: {candidates}")
+        chosen.update(hits)
+    return [t for i, t in enumerate(targets) if i in chosen]
+
+
 def main() -> None:
-    cfg, _ = parse_cli(PacketLossConfig, __doc__)
+    def extra(p):
+        p.add_argument("--target", action="append", metavar="NAME", help="実行する target（モデル名・モデル名/分割点・番号）。複数回指定可。省略時は全て")
+        p.add_argument("--list-targets", action="store_true", help="設定にある target を番号付きで表示して終了する")
+
+    cfg, args = parse_cli(PacketLossConfig, __doc__, extra_args=extra)
+    if args.list_targets:
+        for i, t in enumerate(cfg.targets):
+            print(f"{i}: {target_name(t)}")
+        return
+    cfg.targets = select_targets(cfg.targets, args.target)
     set_seed(cfg.seed)
     head_dev, tail_dev = resolve_device(cfg.devices.head), resolve_device(cfg.devices.tail)
-    run_dir = make_run_dir(cfg.output_dir, cfg.experiment_name)
+    # 一部の target だけを実行する場合は、どのモデルの結果か分かるようにフォルダ名に入れる
+    name = cfg.experiment_name
+    if args.target:
+        name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
+    run_dir = make_run_dir(cfg.output_dir, name)
     save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev)})
     print(f"結果の保存先: {run_dir}")
 

@@ -282,3 +282,73 @@ def test_fetch_zip_members_over_http(tmp_path):
         assert _RangeHandler.requests == before
     finally:
         server.shutdown()
+
+
+# --- スクリプト: target の選択と結果のマージ ------------------------------------------
+
+
+def _load_script(name):
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_select_targets():
+    from splitcomp.config import ModelConfig, SplitTarget
+
+    sweep = _load_script("packet_loss_sweep")
+    targets = [
+        SplitTarget(ModelConfig(name="resnet50"), "layer2"),
+        SplitTarget(ModelConfig(name="resnet50"), "layer3"),
+        SplitTarget(ModelConfig(name="vgg16"), "features_16"),
+    ]
+    assert sweep.select_targets(targets, None) == targets
+    assert sweep.select_targets(targets, ["resnet50"]) == targets[:2]
+    assert sweep.select_targets(targets, ["resnet50/layer3"]) == [targets[1]]
+    assert sweep.select_targets(targets, ["2", "resnet50/layer2"]) == [targets[0], targets[2]]  # 設定ファイルの順
+    with pytest.raises(SystemExit, match="候補"):
+        sweep.select_targets(targets, ["mobilenet_v2"])
+
+
+def test_merge_results(tmp_path):
+    import csv
+    import json
+
+    from splitcomp.metrics import ResultWriter
+
+    merge = _load_script("merge_results")
+
+    def make_run(name, dt, rows, finished=True):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "meta.json").write_text(json.dumps({"datetime": dt}))
+        w = ResultWriter(d)
+        g = ResultWriter(d, "gop_curve")
+        for model, agreement in rows:
+            w.write({"model": model, "split_point": "s", "agreement": agreement})
+            g.write({"model": model, "split_point": "s", "gop_position": 0, "agreement": agreement})
+        for writer in (w, g):
+            if finished:
+                writer.close()
+            else:  # 時間切れで止まった実行は CSV が書かれず jsonl だけが残る
+                writer._f.close()
+        return d
+
+    old = make_run("run_a", "2026-10-12T10:00:00", [("resnet50", 0.1), ("vgg16", 0.2)], finished=False)
+    new = make_run("run_b", "2026-10-13T10:00:00", [("resnet50", 0.9)])
+    out = tmp_path / "merged"
+    source = merge.merge_runs([new, old], out)
+    assert source == {("resnet50", "s"): new, ("vgg16", "s"): old}
+    with open(out / "results.csv", newline="") as f:
+        rows = {r["model"]: float(r["agreement"]) for r in csv.DictReader(f)}
+    assert rows == {"resnet50": 0.9, "vgg16": 0.2}
+    with open(out / "gop_curve.csv", newline="") as f:
+        assert len(list(csv.DictReader(f))) == 2
+    merge.merge_runs([new, old], out)  # 2 回実行しても行が重複しない
+    with open(out / "results.csv", newline="") as f:
+        assert len(list(csv.DictReader(f))) == 2

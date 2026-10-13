@@ -142,6 +142,23 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
 2. 動作確認:
    `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'`
 3. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
+   （全 4 モデルで数時間かかる。ssh で動かすなら tmux の中で）
+
+時間制限のある計算機（時間を指定して借りる JupyterLab など）では、モデルごとに別々に実行して、あとでまとめる:
+
+```bash
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets   # 番号と名前を確認
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target efficientnet_v2_s
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target vgg16
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target mobilenet_v2
+python scripts/merge_results.py runs/packet_loss_ucf101_*_2026* -o runs/packet_loss_ucf101_merged
+```
+
+- `--target` にはモデル名・`モデル名/分割点`・番号のどれでも指定できる。複数回付けると、その分だけまとめて実行する
+- 結果は `runs/packet_loss_ucf101_<モデル名>_<日時>/` に出る
+- `merge_results.py` は、各フォルダの `results` / `gop_curve` を 1 つにまとめる。同じモデルの結果が複数あるときは、新しい実行のほうを使う
+- `*.jsonl` はモデル 1 つ分が終わるたびに追記される。途中で止まった実行（CSV が無いもの）でも、終わったモデルの分はまとめられる
 
 使う動画（`selection: paper`、`src/splitcomp/data/ucf101.py` の `PAPER_CLIPS`）:
 - 論文には「UCF-101 の 5 カテゴリにまたがる 30 クリップ・各 30 連続フレーム」としか書かれておらず、
@@ -168,7 +185,11 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
 ```python
 import pandas as pd
 df = pd.read_csv("runs/<実行ディレクトリ>/results.csv")
-print(df[df.loss_model != "frame"].pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement"))
+# 損失モデルごとに分ける（混ぜると、同じ loss_p の Bernoulli と GE の行が平均されてしまう）。loss_p = 0 の行は基準として入れる
+for m in ["bernoulli", "gilbert_elliott", "frame"]:
+    sub = df[(df.loss_model == m) | (df.loss_p == 0)]
+    print(f"\n== {m}")
+    print(sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement").round(3))
 ```
 
 確認ポイント:
