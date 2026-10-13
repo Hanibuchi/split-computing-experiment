@@ -5,7 +5,8 @@
     config.yaml    実行時の設定（コマンドライン上書きも反映済み）
     meta.json      実行環境（日時, PyTorch バージョン, デバイス, git コミット等）
     results.jsonl  結果（1 行 = 1 試行）。実行中に逐次追記されるので途中で止めても残る
-    results.csv    同じ内容の CSV（終了時に書き出し。Excel / pandas で開きやすい）
+    results.csv    同じ内容の CSV（終了時に書き出し。Excel / pandas で開きやすい）。
+                   既にある results.jsonl に追記した場合（中断した実行の再開など）は前回分の行も含む
 
 を保存する。
 """
@@ -62,6 +63,8 @@ def save_run_info(run_dir: Path, config: dict, extra: dict | None = None) -> Non
 class ResultWriter:
     """結果を 1 行ずつ JSONL に追記し、close() で CSV にもまとめる。
 
+    JSONL が既にあれば、その行も引き継いで CSV に含める（中断した実行を同じフォルダで再開する場合用）。
+
     with 文で使うと自動で close() される::
 
         with ResultWriter(run_dir) as w:
@@ -72,6 +75,9 @@ class ResultWriter:
         self.jsonl_path = Path(run_dir) / f"{name}.jsonl"
         self.csv_path = Path(run_dir) / f"{name}.csv"
         self.rows: list[dict[str, Any]] = []
+        if self.jsonl_path.exists():  # 前回分の行も CSV に含める
+            with open(self.jsonl_path, encoding="utf-8") as f:
+                self.rows = [json.loads(line) for line in f if line.strip()]
         self._f = open(self.jsonl_path, "a", encoding="utf-8")
 
     def write(self, row: dict[str, Any]) -> None:
