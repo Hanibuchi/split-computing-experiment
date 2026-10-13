@@ -352,3 +352,75 @@ def test_merge_results(tmp_path):
     merge.merge_runs([new, old], out)  # 2 回実行しても行が重複しない
     with open(out / "results.csv", newline="") as f:
         assert len(list(csv.DictReader(f))) == 2
+
+
+def test_result_writer_appends_to_existing(tmp_path):
+    import csv
+
+    from splitcomp.metrics import ResultWriter
+
+    with ResultWriter(tmp_path) as w:
+        w.write({"a": 1})
+    with ResultWriter(tmp_path) as w:  # 再開: 前回分も CSV に入る
+        w.write({"a": 2, "b": 3})
+    with open(tmp_path / "results.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["a"] for r in rows] == ["1", "2"]
+    assert (tmp_path / "results.jsonl").read_text().count("\n") == 2
+
+
+def test_checkpoint_roundtrip(tmp_path):
+    from splitcomp.config import ModelConfig, SplitTarget
+
+    sweep = _load_script("packet_loss_sweep")
+    target = SplitTarget(ModelConfig(name="resnet50"), "layer2")
+    other = SplitTarget(ModelConfig(name="vgg16"), "features_16")
+    acc = sweep._Accumulator(4)
+    acc.agree, acc.mse = 5, 0.25
+    acc.pos_agree[1] = 3.0
+    sweep.save_checkpoint(tmp_path, target, 2, 10, [8, 7, 7], {("D+DZ", 4, "no_loss", 0): acc})
+
+    next_clip, shape, accs = sweep.load_checkpoint(tmp_path, target, 10, 4)
+    assert (next_clip, shape) == (2, [8, 7, 7])
+    loaded = accs[("D+DZ", 4, "no_loss", 0)]
+    assert (loaded.agree, loaded.mse) == (5, 0.25)
+    assert loaded.pos_agree.tolist() == [0.0, 3.0, 0.0, 0.0]
+    assert sweep.load_checkpoint(tmp_path, other, 10, 4) is None  # 別の target のチェックポイントは使わない
+    with pytest.raises(SystemExit, match="クリップ数"):
+        sweep.load_checkpoint(tmp_path, target, 30, 4)
+
+
+def test_finished_targets_and_prune(tmp_path):
+    import json
+
+    from splitcomp.config import LossConfig, PacketLossConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    cfg = PacketLossConfig(bits=[2, 4], losses=[LossConfig(p=0.0), LossConfig(p=0.1)])  # 1 方式 × 2 × 2 = 4 行
+    done_rows = [{"model": "resnet50", "split_point": "layer2", "i": i} for i in range(4)]
+    partial_rows = [{"model": "vgg16", "split_point": "features_16", "i": i} for i in range(2)]
+    # 旧バージョンの実行フォルダ（チェックポイントなし）が、書き込み途中の行を残して止まった状態
+    lines = [json.dumps(r) for r in done_rows + partial_rows]
+    (tmp_path / "results.jsonl").write_text("\n".join(lines) + '\n{"model": "vgg1')
+    (tmp_path / "gop_curve.jsonl").write_text("\n".join(lines[:1] + lines[4:]) + "\n")
+
+    done = sweep.finished_targets(tmp_path, cfg)
+    assert done == {"resnet50/layer2"}
+    sweep.prune_unfinished(tmp_path, done)
+    assert sweep._read_jsonl(tmp_path / "results.jsonl") == done_rows
+    assert sweep._read_jsonl(tmp_path / "gop_curve.jsonl") == done_rows[:1]
+
+
+def test_resume_config(tmp_path):
+    import yaml
+
+    from splitcomp.config import PacketLossConfig, to_dict
+
+    sweep = _load_script("packet_loss_sweep")
+    with pytest.raises(SystemExit, match="config.yaml"):
+        sweep.resume_config(tmp_path, [])
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(to_dict(PacketLossConfig(bits=[2, 8]))))
+    cfg = sweep.resume_config(tmp_path, ["devices.head=cpu"])
+    assert cfg.bits == [2, 8] and cfg.devices.head == "cpu"
+    with pytest.raises(SystemExit, match="devices"):
+        sweep.resume_config(tmp_path, ["bits=[4]"])
