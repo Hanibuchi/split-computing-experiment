@@ -12,6 +12,11 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
     gop_curve.csv  GoP 内の位置 t ごとの agreement と特徴 MSE（誤差伝搬の様子）
     *.jsonl        同じ内容。モデル 1 つ分が終わるたびに追記されるので、途中で止まっても終わった分は残る
+    checkpoint.pkl 実行中のモデルの途中経過（クリップ 1 本ごとに保存。モデルが終わると消える）
+
+途中で止まった（セッションが切れた）実行は --resume で同じフォルダの続きから再開できる。
+設定は実行フォルダの config.yaml から読むので --config は不要（devices.* だけは上書きできる）。
+クリップごとの乱数は固定なので、再開しても中断なしで実行したのと同じ結果になる。
 
 例:
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
@@ -20,21 +25,29 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
     # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50
+
+    # 途中で止まった実行を再開する
+    python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20261013-120000
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import json
 import math
+import os
+import pickle
 import statistics
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from splitcomp.builder import build_split
 from splitcomp.cli import parse_cli
-from splitcomp.config import PacketLossConfig, to_dict
+from splitcomp.config import PacketLossConfig, load_config, to_dict
 from splitcomp.data import build_dataset
 from splitcomp.metrics import ResultWriter, make_run_dir, save_run_info
 from splitcomp.temporal import (
@@ -64,6 +77,9 @@ class _Accumulator:
         self.pos_agree = np.zeros(gop)
         self.pos_mse = np.zeros(gop)
         self.pos_count = np.zeros(gop)
+
+
+CHECKPOINT = "checkpoint.pkl"
 
 
 def _clip_seed(seed: int, clip: int) -> int:
@@ -127,26 +143,142 @@ def select_targets(targets: list, names: list[str] | None) -> list:
     return [t for i, t in enumerate(targets) if i in chosen]
 
 
+# ---------------------------------------------------------------------------
+# 途中保存・再開
+# ---------------------------------------------------------------------------
+
+
+def resume_config(run_dir: Path, overrides: list[str]) -> PacketLossConfig:
+    """再開する実行フォルダの config.yaml から設定を読む。
+
+    条件が変わると前回分と結果が混ざるので、上書きはデバイス（devices.*）だけ許す。
+    """
+    path = run_dir / "config.yaml"
+    if not path.exists():
+        raise SystemExit(f"--resume: {path} がありません（packet_loss_sweep.py の実行フォルダを指定してください）")
+    bad = [o for o in overrides if not o.startswith("devices.")]
+    if bad:
+        raise SystemExit(f"--resume では devices.* 以外の設定は変更できません: {bad}")
+    return load_config(PacketLossConfig, path, overrides)
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """JSONL を読む。壊れた行（書き込み途中で止まった最終行など）は読み飛ばす。"""
+    if not path.exists():
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return rows
+
+
+def _row_target(row: dict) -> str:
+    return f"{row['model']}/{row['split_point']}"
+
+
+def finished_targets(run_dir: Path, cfg: PacketLossConfig) -> set[str]:
+    """results.jsonl に全条件の行がそろっている target の名前（モデル名/分割点）。
+
+    チェックポイントの無い旧バージョンの実行フォルダでも、これで終わったモデルが分かる。
+    """
+    expected = len(cfg.schemes) * len(cfg.bits) * len(cfg.losses)
+    counts = Counter(_row_target(r) for r in _read_jsonl(run_dir / "results.jsonl"))
+    return {name for name, n in counts.items() if n >= expected}
+
+
+def prune_unfinished(run_dir: Path, done: set[str]) -> None:
+    """results / gop_curve の jsonl から、終わっていない target の行と壊れた行を取り除く（やり直す分の重複を防ぐ）。"""
+    for name in ("results", "gop_curve"):
+        path = run_dir / f"{name}.jsonl"
+        if not path.exists():
+            continue
+        rows = [r for r in _read_jsonl(path) if _row_target(r) in done]
+        tmp = path.with_suffix(".jsonl.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        os.replace(tmp, path)
+
+
+def save_checkpoint(run_dir: Path, target, next_clip: int, num_clips: int, shape: list[int], accs: dict) -> None:
+    """実行中の target の途中経過（次に処理するクリップ番号と集計値）を保存する。
+
+    書き込み中に止まっても前回のチェックポイントが壊れないよう、一時ファイルに書いてから置き換える。
+    """
+    state = {
+        "target": target_name(target),
+        "next_clip": next_clip,
+        "num_clips": num_clips,
+        "shape": shape,
+        "accs": {key: vars(acc) for key, acc in accs.items()},
+    }
+    path = run_dir / CHECKPOINT
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(state, f)
+    os.replace(tmp, path)
+
+
+def load_checkpoint(run_dir: Path, target, num_clips: int, gop: int) -> tuple[int, list[int], dict] | None:
+    """target のチェックポイントがあれば (次のクリップ番号, 特徴の形状, 集計値) を返す。無ければ None。"""
+    path = run_dir / CHECKPOINT
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    if state["target"] != target_name(target):
+        return None
+    if state["num_clips"] != num_clips:
+        raise SystemExit(f"チェックポイントのクリップ数 {state['num_clips']} が現在のデータセット {num_clips} 本と違います")
+    accs = {}
+    for key, fields in state["accs"].items():
+        acc = _Accumulator(gop)
+        vars(acc).update(fields)
+        accs[key] = acc
+    return state["next_clip"], state["shape"], accs
+
+
 def main() -> None:
     def extra(p):
         p.add_argument("--target", action="append", metavar="NAME", help="実行する target（モデル名・モデル名/分割点・番号）。複数回指定可。省略時は全て")
         p.add_argument("--list-targets", action="store_true", help="設定にある target を番号付きで表示して終了する")
+        p.add_argument("--resume", type=Path, metavar="RUN_DIR", help="途中で止まった実行フォルダの続きから再開する（設定はそのフォルダの config.yaml を使う）")
 
     cfg, args = parse_cli(PacketLossConfig, __doc__, extra_args=extra)
+    if args.resume:
+        if args.config or args.target:
+            print("--resume では実行フォルダの config.yaml を使うので、--config / --target は無視します")
+        cfg = resume_config(args.resume, args.overrides)
     if args.list_targets:
         for i, t in enumerate(cfg.targets):
             print(f"{i}: {target_name(t)}")
         return
-    cfg.targets = select_targets(cfg.targets, args.target)
+    if not args.resume:
+        cfg.targets = select_targets(cfg.targets, args.target)
     set_seed(cfg.seed)
     head_dev, tail_dev = resolve_device(cfg.devices.head), resolve_device(cfg.devices.tail)
-    # 一部の target だけを実行する場合は、どのモデルの結果か分かるようにフォルダ名に入れる
-    name = cfg.experiment_name
-    if args.target:
-        name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
-    run_dir = make_run_dir(cfg.output_dir, name)
-    save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev)})
-    print(f"結果の保存先: {run_dir}")
+    done: set[str] = set()
+    if args.resume:
+        run_dir = args.resume
+        done = finished_targets(run_dir, cfg)
+        prune_unfinished(run_dir, done)
+        meta_path = run_dir / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        meta.setdefault("resumed_at", []).append(dt.datetime.now().isoformat(timespec="seconds"))
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"再開します: {run_dir}（終わっている target: {', '.join(sorted(done)) or 'なし'}）")
+    else:
+        # 一部の target だけを実行する場合は、どのモデルの結果か分かるようにフォルダ名に入れる
+        name = cfg.experiment_name
+        if args.target:
+            name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
+        run_dir = make_run_dir(cfg.output_dir, name)
+        save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev)})
+        print(f"結果の保存先: {run_dir}")
+    print(f"途中で止まったら次のコマンドで再開できます: python scripts/packet_loss_sweep.py --resume {run_dir}")
 
     dataset = build_dataset(cfg.data)
     print(f"クリップ {len(dataset)} 本を評価します（GoP={cfg.gop}, MTU={cfg.mtu}, concealment={cfg.concealment}）")
@@ -157,9 +289,13 @@ def main() -> None:
         for seed in cfg.seeds if loss_cfg.p > 0 else cfg.seeds[:1]:
             conditions.append((loss_cfg, seed))
 
-    summary = []
     with ResultWriter(run_dir) as writer, ResultWriter(run_dir, "gop_curve") as curve_writer:
         for target in cfg.targets:
+            if target_name(target) in done:
+                print(f"\n=== {target.model.name} / {target.split_point}: 前回の実行で終わっているのでスキップ")
+                continue
+            # pretrained: false のときの初期重みが、前の target を飛ばして再開しても変わらないように target ごとに乱数を戻す
+            set_seed(cfg.seed)
             bundle = build_split(target.model, target.split_point)
             if not bundle.point.is_clean:
                 raise ValueError(f"{target.model.name} の分割点 {target.split_point!r} は送信テンソルが複数あります（clean な点を指定してください）")
@@ -170,8 +306,14 @@ def main() -> None:
 
             # acc[(方式名, ビット数, 損失名, シード)]
             accs: dict[tuple, _Accumulator] = defaultdict(lambda: _Accumulator(cfg.gop))
+            start_clip, shape = 0, None
+            ckpt = load_checkpoint(run_dir, target, len(dataset), cfg.gop)
+            if ckpt is not None:
+                start_clip, shape, saved = ckpt
+                accs.update(saved)
+                print(f"  チェックポイントから再開: クリップ {start_clip + 1}/{len(dataset)} から")
             started = time.perf_counter()
-            for clip in range(len(dataset)):
+            for clip in range(start_clip, len(dataset)):
                 x, _ = dataset[clip]
                 with torch.no_grad():
                     ref_pred = model(x.to(tail_dev)).argmax(-1).cpu()
@@ -182,27 +324,32 @@ def main() -> None:
                         for loss_cfg, seed in conditions:
                             key = (scheme.name, bits, loss_cfg.display_name(), seed)
                             run_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, accs[key])
+                shape = list(feats.shape[1:])
+                save_checkpoint(run_dir, target, clip + 1, len(dataset), shape, accs)
                 print(f"  クリップ {clip + 1}/{len(dataset)} 完了（経過 {time.perf_counter() - started:.0f} 秒）", flush=True)
 
-            shape = list(feats.shape[1:])
-            rows = _summarize(cfg, target, shape, accs, curve_writer)
+            rows, curve = _summarize(cfg, target, shape, accs)
+            # gop_curve を先に書く（results の行がそろっていれば gop_curve もそろっている、という再開時の判定のため）
+            for r in curve:
+                curve_writer.write(r)
             for r in rows:
                 writer.write(r)
-            summary += rows
+            (run_dir / CHECKPOINT).unlink(missing_ok=True)
+        summary = list(writer.rows)  # 再開した場合は前回分も含めて表示する
 
     cols = ["model", "split_point", "scheme", "bits", "loss", "agreement", "agreement_drop", "feature_mse", "loss_rate", "entropy_bpe"]
     print("\n" + format_table(summary, cols))
     print(f"\n全結果: {run_dir / 'results.csv'}\nGoP 位置ごと: {run_dir / 'gop_curve.csv'}")
 
 
-def _summarize(cfg: PacketLossConfig, target, shape, accs, curve_writer) -> list[dict]:
-    """シードごとの集計をまとめて結果の行にする。"""
+def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], list[dict]]:
+    """シードごとの集計をまとめて、(results の行, gop_curve の行) を返す。"""
     by_cond: dict[tuple, list[_Accumulator]] = defaultdict(list)
     for (scheme, bits, loss, _seed), acc in accs.items():
         by_cond[(scheme, bits, loss)].append(acc)
     loss_cfgs = {l.display_name(): l for l in cfg.losses}
 
-    rows = []
+    rows, curve = [], []
     for (scheme, bits, loss), group in by_cond.items():
         frames = sum(a.frames for a in group)
         agreement = sum(a.agree for a in group) / frames
@@ -239,7 +386,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs, curve_writer) -> list
         for t in range(cfg.gop):
             if pos_count[t] == 0:
                 continue
-            curve_writer.write(
+            curve.append(
                 {
                     "model": target.model.name,
                     "split_point": target.split_point,
@@ -258,7 +405,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs, curve_writer) -> list
     for r in rows:
         base = no_loss.get((r["scheme"], r["bits"]))
         r["agreement_drop"] = base - r["agreement"] if base is not None else None
-    return rows
+    return rows, curve
 
 
 if __name__ == "__main__":
