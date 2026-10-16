@@ -315,6 +315,17 @@ def test_select_targets():
         sweep.select_targets(targets, ["mobilenet_v2"])
 
 
+def test_select_schemes():
+    from splitcomp.config import TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    schemes = [TemporalSchemeConfig(name) for name in ("F+Sym", "D+DZ", "D+DZ+R")]
+    assert sweep.select_schemes(schemes, None) == schemes
+    assert sweep.select_schemes(schemes, ["D+DZ+R", "F+Sym"]) == [schemes[0], schemes[2]]  # 設定ファイルの順
+    with pytest.raises(SystemExit, match="候補"):
+        sweep.select_schemes(schemes, ["D+Sym"])
+
+
 def test_merge_results(tmp_path):
     import csv
     import json

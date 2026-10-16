@@ -1,0 +1,25 @@
+# =====================================================================
+# scripts/packet_loss_sweep.py 用のお試し設定（新手法を試す段階向け）
+#   本番の configs/packet_loss_ucf101.yaml を base として読み、条件を減らした項目だけを上書きする。
+#   方式（schemes）・ビット数・クリップ数・シードは本番と同じ。方式を足すときは本番の設定に書けば、ここにも反映される。
+#
+#   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml
+#   方式を絞る: ... --scheme D+DZ --scheme D+DZ+R
+# =====================================================================
+
+base: packet_loss_ucf101.yaml
+experiment_name: packet_loss_ucf101_quick
+
+# 4 モデルのうち 2 つだけ（list は丸ごと置き換わる）
+targets:
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # L2: 512x28x28
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 16: 256x28x28
+
+# バーストロス（Gilbert-Elliott）だけ。no_loss は agreement_drop の基準（シードによらず 1 回だけ実行するので軽い）
+losses:
+  - {name: bernoulli, p: 0.0, label: no_loss}
+  - {name: gilbert_elliott, p: 0.01, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.02, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.05, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.1, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.2, burst_len: 4}
