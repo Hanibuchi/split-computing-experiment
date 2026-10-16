@@ -12,6 +12,10 @@ YAML ファイルを読み込んだあと、コマンドラインの ``key=value
 - ``a.b=値`` でネストした項目を上書きする。
 - ``codecs.0.bits=4`` のように数字でリストの要素を指定できる。
 - 値は YAML として解釈される（``true`` → bool、``[1,2]`` → list、``null`` → None）。
+
+YAML の最上位に ``base: 別の設定.yaml``（その YAML のフォルダからの相対パス）を書くと、
+そのファイルを読んだうえで、書いた項目だけを上書きする。dict は項目ごとにマージし、
+list や値は丸ごと置き換える（例: configs/packet_loss_ucf101_quick.yaml）。
 """
 
 from __future__ import annotations
@@ -378,16 +382,37 @@ def load_config(cls: type[T], path: str | Path | None = None, overrides: list[st
     Returns:
         cls のインスタンス。
     """
-    raw: dict = {}
-    if path is not None:
-        with open(path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
+    raw: dict = _read_yaml(Path(path)) if path is not None else {}
     for item in overrides or []:
         if "=" not in item:
             raise ValueError(f"上書き指定は key=value の形式で書いてください: {item!r}")
         key, value = item.split("=", 1)
         _set_by_path(raw, key.split("."), yaml.safe_load(value))
     return from_dict(cls, raw)
+
+
+def _read_yaml(path: Path, seen: tuple[Path, ...] = ()) -> dict:
+    """YAML を読む。最上位に ``base:`` があれば、そのファイル（path のフォルダからの相対パス）に上書きした結果を返す。"""
+    path = path.resolve()
+    if path in seen:
+        raise ValueError(f"設定の base が循環しています: {' -> '.join(map(str, (*seen, path)))}")
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    base = raw.pop("base", None)
+    if base is None:
+        return raw
+    return _deep_merge(_read_yaml(path.parent / base, (*seen, path)), raw)
+
+
+def _deep_merge(base: dict, child: dict) -> dict:
+    """child で base を上書きした dict を返す。dict は項目ごとにマージし、list や値は丸ごと置き換える。"""
+    merged = dict(base)
+    for key, value in child.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def to_dict(cfg: Any) -> dict:
