@@ -509,3 +509,114 @@ def test_encode_once_matches_reference(interleave):
                                 assert np.array_equal(got, v), k
                             else:
                                 assert got == v, k
+
+
+# --- ロス補修 net（D+DZ+R） --------------------------------------------------------
+
+
+def _run_with_restorer(feats, restorer, lost_packets, bits=4, mtu=60):
+    """D+DZ で符号化し、指定したパケットを落として復号する。lost_packets: {フレーム番号: 落とすパケット番号のリスト}"""
+    n = feats[0].numel()
+    assign = packet_assignment(n, bits, mtu)
+    P = num_packets(n, bits, mtu)
+    enc = TemporalEncoder("dpcm", bits, 30, "dz")
+    dec = TemporalDecoder("hold", restorer=restorer)
+    out = []
+    for t, f in enumerate(feats):
+        lost = np.zeros(P, dtype=bool)
+        lost[lost_packets.get(t, [])] = True
+        out.append(dec.decode(enc.encode(f), received_mask(lost, assign) if lost.any() else None))
+    return torch.stack(out)
+
+
+def test_untrained_restorer_equals_hold():
+    """最後の層が 0 初期化なので、学習前の補修 net は hold と全く同じ結果になる。"""
+    from splitcomp.temporal import LossRestorer
+
+    feats = _video(T=8)
+    lost = {0: [0], 3: [1], 4: [0, 2]}
+    torch.testing.assert_close(_run_with_restorer(feats, LossRestorer().restore, lost), _run_with_restorer(feats, None, lost), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("shape", [(8, 6, 6), (16, 7, 7), (3, 14, 10)])
+def test_restorer_is_channel_agnostic_and_keeps_received(shape):
+    """同じ net がチャネル数・空間サイズの違う特徴に使え、届いた要素は変えない。"""
+    from splitcomp.temporal import LossRestorer
+
+    torch.manual_seed(0)
+    net = LossRestorer(hidden=8, dilations=(1, 2))
+    torch.nn.init.normal_(net.out.weight, std=0.1)  # 0 初期化のままだと何も変わらないので、出力が出るようにする
+    prev = torch.randn(shape)
+    cur = prev + 0.1 * torch.randn(shape)
+    received = torch.rand(shape) > 0.3
+    cur = torch.where(received, cur, prev)
+    out = net.restore(prev, cur, received)
+    assert out.shape == prev.shape
+    torch.testing.assert_close(out[received], cur[received], rtol=0, atol=0)
+    assert not torch.equal(out[~received], cur[~received])
+
+
+def test_restorer_called_only_for_lossy_p_frames():
+    calls = []
+
+    def restorer(prev, cur, received):
+        calls.append(int((~received).sum()))
+        return cur
+
+    feats = _video(T=6)
+    _run_with_restorer(feats, restorer, {0: [0], 2: [1]})  # フレーム 0 は I フレーム
+    assert len(calls) == 1 and calls[0] > 0
+
+
+def test_restorer_save_load(tmp_path):
+    from splitcomp.temporal import LossRestorer, load_restorer, save_restorer
+
+    torch.manual_seed(0)
+    net = LossRestorer(hidden=8, dilations=(1, 3))
+    torch.nn.init.normal_(net.out.weight, std=0.1)
+    save_restorer(tmp_path / "r.pt", net, {"targets": ["x/y"]})
+    loaded = load_restorer(tmp_path / "r.pt")
+    assert loaded.meta == {"targets": ["x/y"]}
+    prev, received = torch.randn(4, 5, 5), torch.rand(4, 5, 5) > 0.5
+    torch.testing.assert_close(loaded.restore(prev, prev, received), net.restore(prev, prev, received))
+
+
+def test_ucf101_groups_and_clips_per_class(tmp_path):
+    from PIL import Image
+
+    from splitcomp.data.ucf101 import group_of, parse_groups
+
+    assert parse_groups("8-10,12") == {8, 9, 10, 12} and parse_groups([1, 3]) == {1, 3} and parse_groups(None) is None
+    assert group_of("v_ApplyEyeMakeup_g08_c02") == 8
+    for cls in ("ApplyEyeMakeup", "Basketball"):
+        for g, c in [(1, 1), (8, 1), (9, 2), (10, 1)]:
+            d = tmp_path / "UCF-101" / cls / f"v_{cls}_g{g:02d}_c{c:02d}"
+            d.mkdir(parents=True)
+            for i in range(2):
+                Image.fromarray(np.full((8, 8, 3), i, dtype=np.uint8)).save(d / f"{i:04d}.jpg")
+    kw = {"num_clips": 2, "clip_len": 2, "size": 8, "selection": "random", "download": False, "groups": "8-25", "clips_per_class": 2}
+    ds = build_dataset(DataConfig(name="ucf101", root=str(tmp_path), num_samples=None, kwargs=kw))
+    names = [ds.clip_name(i) for i in range(len(ds))]
+    assert len(names) == 4 and len(set(names)) == 4
+    assert all(group_of(n) >= 8 for n in names)
+
+
+def test_train_restorer_step_reduces_loss():
+    """学習スクリプトの simulate / train_step が動き、同じバッチで繰り返すと損失が下がる。"""
+    from splitcomp.config import LossConfig, RestorerTrainConfig
+    from splitcomp.temporal import LossRestorer
+
+    script = _load_script("train_restorer")
+    cfg = RestorerTrainConfig(mtu=60, gop=30, max_channels=None)
+    torch.manual_seed(0)
+    net = LossRestorer(hidden=8, dilations=(1, 2))
+    feats = _video(T=10, shape=(8, 6, 6))
+    samples, err, ref = script.simulate(feats, cfg, 4, LossConfig("bernoulli", 0.3), 0, net)
+    assert samples and err > 0 and ref > 0
+    _, err_hold, _ = script.simulate(feats, cfg, 4, LossConfig("bernoulli", 0.3), 0, None)
+    assert err == pytest.approx(err_hold)  # 学習前は hold と同じ
+    opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+    first = script.train_step(net, opt, samples, cfg, "cpu")
+    for _ in range(30):
+        last = script.train_step(net, opt, samples, cfg, "cpu")
+    assert last < first

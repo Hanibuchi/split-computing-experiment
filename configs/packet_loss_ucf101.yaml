@@ -36,10 +36,14 @@ devices:
   tail: auto
 
 # 比較する方式（論文の F+Sym / D+Sym / D+DZ）
+#   D+DZ+R: D+DZ のクラウド側に、モデル共通のロス補修 net を挟む（head / tail は再学習しない）。
+#           先に scripts/train_restorer.py で学習しておく（configs/train_restorer_ucf101.yaml → 下のパスに保存される）。
+#           学習していない場合は、この行を消すかコメントアウトする
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
   - {name: D+Sym, scheme: dpcm, p_quant: sym}
   - {name: D+DZ, scheme: dpcm, p_quant: dz}
+  - {name: D+DZ+R, scheme: dpcm, p_quant: dz, restorer: checkpoints/restorer_resnet50_layer2.pt}
 
 bits: [2, 4, 8]
 gop: 30

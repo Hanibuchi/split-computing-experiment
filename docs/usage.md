@@ -214,3 +214,42 @@ output, stats = SplitPipeline(head, codec, backend, device).run(x)
 ```
 
 自作の `nn.Module` もそのまま `Splitter(my_model)` に渡せます（`build_model` を通す必要はありません）。
+
+---
+
+## 6. `scripts/train_restorer.py` — ロス補修 net の学習（D+DZ+R）
+
+```bash
+python scripts/train_restorer.py --config configs/train_restorer_ucf101.yaml
+python scripts/train_restorer.py --config configs/train_restorer_ucf101.yaml data.kwargs.num_clips=4 val_clips=1 epochs=1 save_to=null  # 動作確認
+```
+
+`packet_loss_sweep.py` の方式 D+DZ+R で使う、パケットロスで欠けた特徴をクラウド側で補う小さな CNN を学習します。
+head / tail は固定で、tail・ラベルは使いません。全てのチャネルで同じ重みを使うので、学習した 1 つの net を
+どのモデル・分割点にもそのまま使えます。考え方と評価の手順は [experiments.md のレシピ 5](experiments.md) を参照。
+
+| 項目 | 意味 |
+|---|---|
+| `targets` | 学習に使う (モデル, 分割点)。複数書くと混ぜて学習する |
+| `data` | 学習用の動画。ucf101 の `selection: random` に `groups: "8-25"`（評価用の g01 と重ならない）と `clips_per_class` |
+| `val_clips` | `data` の末尾から検証に回す本数 |
+| `bits`, `gop`, `mtu`, `interleave` | 符号化の条件（評価の設定と合わせる）。bits は系列ごとにランダムに選ぶ |
+| `losses` | 学習時に起こす損失（系列ごとにランダムに 1 つ選ぶ） |
+| `hidden`, `dilations` | 補修 net の中間チャネル数と、各層の dilation（層の数） |
+| `epochs`, `sequences_per_clip`, `batch_size`, `lr` | 学習の長さ・1 エポックで 1 クリップから作る系列数・1 回の更新のフレーム数・学習率 |
+| `max_channels` | 1 フレームあたり学習に使うチャネル数の上限（欠けた要素を含むチャネルから選ぶ） |
+| `save_to` | 重みのコピー先（`packet_loss_sweep` の方式の `restorer:` に指定する） |
+
+出力（`runs/train_restorer_ucf101_<日時>/`）:
+
+- `restorer.pt`: 検証の誤差が最も小さかったエポックの重み（学習条件のメモ付き）
+- `results.csv`: エポックごとの `train_loss`、`val_rel_err`（補修あり）、`val_rel_err_hold`（hold だけ）、`val_ratio`
+
+Python から使う場合:
+
+```python
+from splitcomp.temporal import TemporalDecoder, load_restorer
+
+restorer = load_restorer("checkpoints/restorer_resnet50_layer2.pt", device="cuda")
+dec = TemporalDecoder("hold", restorer=restorer.restore)
+```
