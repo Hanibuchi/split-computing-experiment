@@ -224,5 +224,5 @@ runs/
 /data/
 checkpoints/
 
-# 論文 PDF（著作権のため管理しない）
-docs/*.pdf
+# 論文（著作権のため管理しない）。papers/ に置く
+/papers/
