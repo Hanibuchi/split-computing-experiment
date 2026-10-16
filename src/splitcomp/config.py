@@ -177,6 +177,9 @@ class TemporalSchemeConfig:
     scheme: str = "dpcm"
     #: P フレームの量子化方式。"sym"（対称）/ "dz"（dead-zone）。I フレームは常に対称。
     p_quant: str = "dz"
+    #: ロス補修 net の学習済み重み（scripts/train_restorer.py の出力）。指定すると P フレームでロスが起きたときに
+    #: 欠けた要素を補ってから tail に渡す（例: D+DZ+R）。None なら使わない。
+    restorer: str | None = None
 
 
 @dataclass
@@ -315,6 +318,46 @@ class PacketLossConfig:
     losses: list[LossConfig] = field(default_factory=lambda: [LossConfig()])
     #: 損失パターンの乱数シード（損失率 0 の条件は 1 回だけ実行する）。
     seeds: list[int] = field(default_factory=lambda: [0])
+
+
+@dataclass
+class RestorerTrainConfig:
+    """scripts/train_restorer.py 用: モデル共通のロス補修 net（splitcomp.temporal.restore）を学習する。
+
+    head（固定）の特徴を DPCM + dead-zone 量子化で符号化し、ランダムなパケットロスを起こして、
+    欠けた要素を「ロスがなかったときの復元特徴」に近づけるよう学習する。tail やラベルは使わない。
+    """
+
+    experiment_name: str = "train_restorer"
+    output_dir: str = "runs"
+    seed: int = 0
+    #: 学習に使う (モデル, 分割点)。複数書くと混ぜて学習する。分割点は送信テンソルが 1 つで (C, H, W) の点であること。
+    targets: list[SplitTarget] = field(default_factory=lambda: [SplitTarget()])
+    #: 学習用の動画（評価用のクリップと重ならないようにする。例: ucf101 の groups: "8-25"）。
+    data: DataConfig = field(default_factory=lambda: DataConfig(name="ucf101", root="./data", num_samples=None))
+    #: data の末尾から何本を検証用にするか（学習には使わない）。
+    val_clips: int = 10
+    devices: DeviceConfig = field(default_factory=DeviceConfig)
+    #: 符号化の条件（評価と合わせる）。bits は系列ごとにこの中からランダムに選ぶ。
+    bits: list[int] = field(default_factory=lambda: [2, 4, 8])
+    gop: int = 30
+    mtu: int = 1400
+    interleave: bool = False
+    #: 学習時に起こす損失。系列ごとにこの中からランダムに選ぶ。
+    losses: list[LossConfig] = field(default_factory=lambda: [LossConfig("bernoulli", 0.05)])
+    #: 補修 net の構成（splitcomp.temporal.restore.LossRestorer の引数）。
+    hidden: int = 32
+    dilations: list[int] = field(default_factory=lambda: [1, 2, 4, 2, 1])
+    epochs: int = 10
+    #: 1 エポックで 1 クリップあたり何系列（bits・損失をランダムに選んで符号化 → ロス）を作るか。
+    sequences_per_clip: int = 2
+    #: 1 回の更新に使うフレーム数（ロスのあった P フレーム）。
+    batch_size: int = 4
+    #: 1 フレームあたり学習に使うチャネル数の上限（メモリと時間の節約。null で全て）。
+    max_channels: int | None = 128
+    lr: float = 1e-3
+    #: 学習した重みを run フォルダ（restorer.pt）に加えて、ここにも保存する（packet_loss_sweep の restorer に指定する用）。
+    save_to: str | None = None
 
 
 # ---------------------------------------------------------------------------
