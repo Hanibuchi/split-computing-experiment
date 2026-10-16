@@ -31,6 +31,7 @@ src/splitcomp/
 ├── data/registry.py     build_dataset / build_dataloader / register_dataset
 ├── data/ucf101.py       UCF101Clips（動画クリップ）
 ├── temporal/            動画の時系列符号化（FD / DwD / DPCM, dead-zone 量子化）とパケットロス
+│   └── restore.py       LossRestorer（ロスで欠けた特徴をクラウド側で補う、モデル共通のロス補修 net）
 ├── split/
 │   ├── splitter.py      Splitter（分割点の列挙と分割）, split_sequential（簡易版）
 │   └── pipeline.py      SplitPipeline, Backend, LocalBackend

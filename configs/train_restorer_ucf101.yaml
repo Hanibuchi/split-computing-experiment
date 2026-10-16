@@ -1,0 +1,67 @@
+# =====================================================================
+# scripts/train_restorer.py 用の設定
+#   packet_loss_sweep.py の方式 "D+DZ+R" で使う、モデル共通のロス補修 net を学習する。
+#   head / tail は固定（再学習しない）。各項目の意味は src/splitcomp/config.py の RestorerTrainConfig を参照。
+#
+#   実行: python scripts/train_restorer.py --config configs/train_restorer_ucf101.yaml
+#   動作確認: ... data.kwargs.num_clips=4 val_clips=1 epochs=1
+# =====================================================================
+
+experiment_name: train_restorer_ucf101
+output_dir: runs
+seed: 0
+
+# 学習に使う (モデル, 分割点)。ここで学習した net を、packet_loss_sweep では 4 モデル全てに使う
+# （efficientnet_v2_s / vgg16 / mobilenet_v2 は学習に使っていないモデルでの汎化を見ることになる）
+targets:
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}   # L2: 512x28x28
+
+# 評価用の 30 本（グループ g01）と重ならないよう、公式 split 1 の train 側（g08–g25）から選ぶ
+data:
+  name: ucf101
+  root: ./data
+  split: train            # （ucf101 では未使用）
+  num_samples: null
+  kwargs:
+    selection: random
+    groups: "8-25"
+    num_clips: 101        # クラス数（101 で全クラス）。初回は約 200 本（100MB 程度）をダウンロードする
+    clips_per_class: 2    # 1 クラスから選ぶ動画の本数（クリップ数 = num_clips × clips_per_class）
+    seed: 0
+    clip_len: 30
+    frame_step: 1
+    size: 224
+    download: true
+val_clips: 10             # data の末尾 10 本を検証に使う（学習には使わない）
+
+devices:
+  head: auto
+  tail: auto              # 補修 net を学習するデバイス
+
+# 符号化の条件（packet_loss_ucf101.yaml と合わせる）
+bits: [2, 4, 8]
+gop: 30
+mtu: 1400
+interleave: false
+
+# 学習時に起こす損失（系列ごとにランダムに 1 つ選ぶ）
+losses:
+  - {name: bernoulli, p: 0.02}
+  - {name: bernoulli, p: 0.05}
+  - {name: bernoulli, p: 0.1}
+  - {name: bernoulli, p: 0.2}
+  - {name: gilbert_elliott, p: 0.05, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.1, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.2, burst_len: 4}
+  - {name: frame, p: 0.1}
+
+# 補修 net の構成
+hidden: 32
+dilations: [1, 2, 4, 2, 1]
+
+epochs: 10
+sequences_per_clip: 2
+batch_size: 4
+max_channels: 128
+lr: 0.001
+save_to: checkpoints/restorer_resnet50_layer2.pt
