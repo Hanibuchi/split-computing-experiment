@@ -83,4 +83,5 @@ src/splitcomp/      ライブラリ本体
   config.py           設定項目の定義（全項目の説明あり）
 tests/              テスト
 runs/               実験結果の出力先（git 管理外）
+papers/             参考論文の置き場（git 管理外）
 ```
