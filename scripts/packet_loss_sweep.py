@@ -28,6 +28,9 @@ torch の CPU スレッド数は、ジョブに割り当てられたコア数（
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'
 
+    # 新手法を試す段階: 条件を減らしたお試し設定（2 モデル・Gilbert-Elliott のみ）。--scheme で方式も絞れる
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+R
+
     # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50
@@ -196,6 +199,20 @@ def select_targets(targets: list, names: list[str] | None) -> list:
     return [t for i, t in enumerate(targets) if i in chosen]
 
 
+def select_schemes(schemes: list, names: list[str] | None) -> list:
+    """names（方式名）に一致する方式を、設定ファイルの順で返す。
+
+    names が空なら全ての方式を返す。一致しない名前があればエラーにする。
+    """
+    if not names:
+        return list(schemes)
+    known = {s.name for s in schemes}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise SystemExit(f"--scheme {', '.join(unknown)} に一致する方式がありません。候補: {', '.join(s.name for s in schemes)}")
+    return [s for s in schemes if s.name in names]
+
+
 # ---------------------------------------------------------------------------
 # 途中保存・再開
 # ---------------------------------------------------------------------------
@@ -297,13 +314,14 @@ def load_checkpoint(run_dir: Path, target, num_clips: int, gop: int) -> tuple[in
 def main() -> None:
     def extra(p):
         p.add_argument("--target", action="append", metavar="NAME", help="実行する target（モデル名・モデル名/分割点・番号）。複数回指定可。省略時は全て")
+        p.add_argument("--scheme", action="append", metavar="NAME", help="実行する方式（設定の schemes の name）。複数回指定可。省略時は全て")
         p.add_argument("--list-targets", action="store_true", help="設定にある target を番号付きで表示して終了する")
         p.add_argument("--resume", type=Path, metavar="RUN_DIR", help="途中で止まった実行フォルダの続きから再開する（設定はそのフォルダの config.yaml を使う）")
 
     cfg, args = parse_cli(PacketLossConfig, __doc__, extra_args=extra)
     if args.resume:
-        if args.config or args.target:
-            print("--resume では実行フォルダの config.yaml を使うので、--config / --target は無視します")
+        if args.config or args.target or args.scheme:
+            print("--resume では実行フォルダの config.yaml を使うので、--config / --target / --scheme は無視します")
         cfg = resume_config(args.resume, args.overrides)
     if args.list_targets:
         for i, t in enumerate(cfg.targets):
@@ -311,6 +329,7 @@ def main() -> None:
         return
     if not args.resume:
         cfg.targets = select_targets(cfg.targets, args.target)
+        cfg.schemes = select_schemes(cfg.schemes, args.scheme)
     for s in cfg.schemes:
         if s.restorer and not Path(s.restorer).exists():
             raise SystemExit(
