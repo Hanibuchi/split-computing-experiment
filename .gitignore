@@ -225,4 +225,6 @@ runs/
 checkpoints/
 
 # 論文（著作権のため管理しない）。papers/ に置く
-/papers/
+# フォルダ自体は .gitkeep で残し、中身だけ除外する
+/papers/*
+!/papers/.gitkeep
