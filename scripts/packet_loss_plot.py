@@ -28,12 +28,13 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
-# 方式の表示順と色・マーカー（すべての図で共通）
-SCHEMES = ["F+Sym", "D+Sym", "D+DZ"]
+# 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
     "D+DZ": {"color": "#eda100", "marker": "D"},
+    "D+DZ+R": {"color": "#c2185b", "marker": "s"},
 }
 # 3 系列までの色（ビット数・損失モデル用）
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
@@ -343,6 +344,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     df, gop = load(args.run_dir)
     print(f"{len(df)} 行（モデル: {', '.join(models_of(df))}）を読みました。出力先: {out_dir}")
+    SCHEMES[:] = [s for s in SCHEMES if s in set(df.scheme)]  # 結果に無い方式は凡例・表に出さない
 
     plot_agreement_vs_loss(df, out_dir)
     plot_drop_heatmap(df, out_dir)

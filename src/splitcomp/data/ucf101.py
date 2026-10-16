@@ -12,7 +12,8 @@ UCF-101 は 101 種類の動作（クラス）の動画データセットで、�
 
 クリップの選び方（``selection``）:
     "paper"  : :data:`PAPER_CLIPS` の 30 本（既定）。Shiba et al. (IEEE Access 2026) §V-B と同じ条件を狙ったもの
-    "random" : seed で num_clips クラスを選び、各クラスから動画を 1 本ずつ選ぶ
+    "random" : seed で num_clips クラスを選び、各クラスから動画を clips_per_class 本ずつ選ぶ。
+               groups で撮影グループを絞れる（例: "8-25" = 公式 split 1 の train 側。評価用の g01 と重ならない）
 
 1 要素 = 1 クリップで ``(frames[T, 3, size, size], label)`` を返す（label は 101 クラスのアルファベット順の番号）。
 各動画の先頭から clip_len フレームを（frame_step おきに）取り出す。frame_step=2 で時間間隔が 2 倍（論文の 15fps 実験）。
@@ -98,6 +99,24 @@ def class_of(video: str) -> str:
     return video[2:].rsplit("_", 2)[0]
 
 
+def group_of(video: str) -> int:
+    """動画名 ``v_<クラス名>_gXX_cYY`` から撮影グループの番号 XX を取り出す。"""
+    return int(video.rsplit("_", 2)[1][1:])
+
+
+def parse_groups(groups: list[int] | str | None) -> set[int] | None:
+    """groups の指定（[8, 9] / "8-25" / "1,3,8-10" / None）を番号の集合にする。"""
+    if groups is None:
+        return None
+    if isinstance(groups, str):
+        out: set[int] = set()
+        for part in groups.split(","):
+            a, _, b = part.strip().partition("-")
+            out.update(range(int(a), int(b or a) + 1))
+        return out
+    return {int(g) for g in groups}
+
+
 class UCF101Clips(Dataset):
     """UCF-101 から固定長のクリップを取り出すデータセット。
 
@@ -109,6 +128,9 @@ class UCF101Clips(Dataset):
         size: 入力解像度（size × size にリサイズする。論文と同じくクロップしない）。
         selection: "paper"（PAPER_CLIPS）/ "random"（seed でクラスを選ぶ）。
         seed: selection="random" のときの乱数シード。
+        groups: selection="random" で使う撮影グループ（gXX の番号）。[8, 9, 10] のようなリストか "8-25" の形の文字列。
+            None なら全て。
+        clips_per_class: selection="random" で 1 クラスから選ぶ動画の本数（クリップ数は num_clips × clips_per_class）。
         download: 手元にない動画を自動でダウンロードするか。
         cache: デコード結果を ``.cache`` に保存するか。
     """
@@ -122,6 +144,8 @@ class UCF101Clips(Dataset):
         size: int = 224,
         selection: str = "paper",
         seed: int = 0,
+        groups: list[int] | str | None = None,
+        clips_per_class: int = 1,
         download: bool = True,
         cache: bool = True,
     ):
@@ -136,7 +160,7 @@ class UCF101Clips(Dataset):
         if selection == "paper":
             videos = [v for _, v in PAPER_CLIPS][:num_clips]
         elif selection == "random":
-            videos = self._random_videos(num_clips or 30, seed, download)
+            videos = self._random_videos(num_clips or 30, seed, download, parse_groups(groups), clips_per_class)
         else:
             raise KeyError(f"未知の selection です: {selection!r}（\"paper\" / \"random\"）")
 
@@ -167,13 +191,16 @@ class UCF101Clips(Dataset):
                 return p
         return None
 
-    def _random_videos(self, num_clips: int, seed: int, download: bool) -> list[str]:
+    def _random_videos(self, num_clips: int, seed: int, download: bool, groups: set[int] | None = None, per_class: int = 1) -> list[str]:
+        def keep(names: list[str]) -> list[str]:
+            return sorted(v for v in names if groups is None or group_of(v) in groups)
+
         local = {}
         if self.base.is_dir():
             for d in self.base.iterdir():
                 if d.is_dir() and not d.name.startswith("."):
-                    vids = sorted(p.stem if p.is_file() else p.name for p in d.iterdir() if p.suffix.lower() in _VIDEO_EXTS or p.is_dir())
-                    if vids:
+                    vids = keep([p.stem if p.is_file() else p.name for p in d.iterdir() if p.suffix.lower() in _VIDEO_EXTS or p.is_dir()])
+                    if len(vids) >= per_class:
                         local[d.name] = vids
         if len(local) < num_clips:
             if not download:
@@ -183,9 +210,15 @@ class UCF101Clips(Dataset):
                 parts = name.split("/")
                 if len(parts) == 3 and parts[2].endswith(".avi"):
                     local.setdefault(parts[1], []).append(parts[2][:-4])
-            local = {k: sorted(v) for k, v in local.items()}
+            local = {k: keep(v) for k, v in local.items()}
+            local = {k: v for k, v in local.items() if len(v) >= per_class}
+            if len(local) < num_clips:
+                raise ValueError(f"条件（groups={sorted(groups) if groups else None}, clips_per_class={per_class}）に合うクラスが {len(local)} 個しかありません")
         rng = random.Random(seed)
-        return [rng.choice(local[c]) for c in sorted(rng.sample(sorted(local), num_clips))]
+        classes = sorted(rng.sample(sorted(local), num_clips))
+        if per_class == 1:
+            return [rng.choice(local[c]) for c in classes]
+        return [v for c in classes for v in sorted(rng.sample(local[c], per_class))]
 
     def __len__(self) -> int:
         return len(self.clips)

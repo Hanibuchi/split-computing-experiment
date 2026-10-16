@@ -18,7 +18,7 @@ Split Computing の研究用基盤です。中間特徴の**圧縮**、**通信�
 | 特徴の圧縮 | float32/16/bf16、1〜16 bit 一様量子化（チャネル単位も可）、zlib / lz4。組み合わせ自由・独自方式も追加可能 |
 | 通信 | 帯域・RTT から計算するシミュレーション と、TCP による実ネットワーク通信の両方 |
 | 計測 | head / encode / 通信 / decode / tail の各時間、送信データ量、圧縮率、精度（top-k）、元モデルとの一致度 |
-| 動画・パケットロス | 動画の中間特徴の時系列符号化（FD / DPCM、dead-zone 量子化）を、Bernoulli・バースト（Gilbert-Elliott）・フレーム単位のパケットロス下で評価（`scripts/packet_loss_sweep.py`）。UCF-101 は使う動画だけを自動でダウンロードする。モデルごとに分けて実行し、結果をまとめることもできる。途中で止まっても `--resume` で続きから再開できる |
+| 動画・パケットロス | 動画の中間特徴の時系列符号化（FD / DPCM、dead-zone 量子化）を、Bernoulli・バースト（Gilbert-Elliott）・フレーム単位のパケットロス下で評価（`scripts/packet_loss_sweep.py`）。UCF-101 は使う動画だけを自動でダウンロードする。モデルごとに分けて実行し、結果をまとめることもできる。途中で止まっても `--resume` で続きから再開できる。再学習なしでロスを補う、モデル共通のロス補修 net（D+DZ+R, `scripts/train_restorer.py`）も比較できる |
 | 学習 | 分割点にエンコーダ / デコーダ（ボトルネック）を挿入し、元モデルからの知識蒸留で学習 |
 | タスク非依存 | 分類以外のモデルでも動作（出力が dict のリストでも可）。指標は関数を渡して追加できる |
 
@@ -70,7 +70,7 @@ Python から直接使う最小例は [`examples/quickstart.py`](examples/quicks
 configs/            設定ファイルの例（各項目に日本語コメントあり）
 docs/               ドキュメント
 examples/           Python API の使用例
-scripts/            実験用スクリプト（list_splits / sweep / train_bottleneck / serve / client / packet_loss_sweep / merge_results / packet_loss_plot）
+scripts/            実験用スクリプト（list_splits / sweep / train_bottleneck / serve / client / packet_loss_sweep / train_restorer / merge_results / packet_loss_plot）
 src/splitcomp/      ライブラリ本体
   split/              モデル分割（Splitter）と分割推論（SplitPipeline）
   compression/        圧縮方式（Codec）と学習型ボトルネック
@@ -78,7 +78,7 @@ src/splitcomp/      ライブラリ本体
   profiling/          時間計測
   metrics/            評価指標と結果の保存
   training/           ボトルネックの蒸留学習
-  temporal/           動画の時系列符号化（DPCM / dead-zone）とパケットロスのモデル
+  temporal/           動画の時系列符号化（DPCM / dead-zone）、パケットロスのモデル、ロス補修 net
   models/, data/      モデル・データセットの登録と構築
   config.py           設定項目の定義（全項目の説明あり）
 tests/              テスト

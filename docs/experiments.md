@@ -239,6 +239,51 @@ for m in ["bernoulli", "gilbert_elliott", "frame"]:
 - `gop_curve.csv` で、ロス後に誤差が GoP の終わりまで残るか
 - `gop` を短くしたとき（`gop=10` など）の、ロス耐性と送信量のトレードオフ
 
+### ロス補修 net（D+DZ+R）
+
+Itahara et al. (2021) は、パケットロスを模擬しながら DNN を再学習してロスへの耐性を得ています。
+D+DZ+R は再学習をしない代わりに、**クラウド側で復号のあと・tail の前**に小さな CNN（`splitcomp.temporal.restore.LossRestorer`）を挟みます。
+
+- P フレームでロスが起きたときだけ動く。入力は「前フレームの復元特徴 f̂_{t−1}」「今のフレームの復元特徴（欠けた要素は hold で埋めたもの）」「届いたマスク」
+- 全てのチャネルで同じ重みを使う（1 チャネル = 1 サンプル）。そのため 1 つのモデルで学習した net を、
+  チャネル数・空間サイズの違う他のモデル・分割点にもそのまま使える。チャネル間の情報は、届いた要素の差分を
+  チャネル方向に平均した「どこが動いたか」のマップ（チャネル数によらない）として渡す
+- head / tail は固定のまま。学習の目的は特徴の MSE（「ロスがなかったときの復元特徴」との差）だけで、tail もラベルも使わない（タスク非依存）
+- 補った値は復号器の状態（次のフレームの基準）にもなるので、DPCM のずれの伝搬も減る
+- 最後の層は 0 で初期化するので、学習前は D+DZ と全く同じ結果になる。ロスがない条件でも D+DZ と同じ結果になる
+
+手順:
+
+1. 学習する（既定は resnet50/layer2 の特徴で学習。動画は評価用の 30 本（g01）と重ならないよう、公式 split 1 の train 側 g08–g25 から
+   101 クラス × 2 本を自動でダウンロードする。約 100MB）
+
+   ```bash
+   # 動作確認（クリップ 4 本・1 エポック）
+   python scripts/train_restorer.py --config configs/train_restorer_ucf101.yaml data.kwargs.num_clips=4 data.kwargs.clips_per_class=1 val_clips=1 epochs=1 save_to=null
+   # 本番。重みは runs/train_restorer_ucf101_<日時>/restorer.pt と checkpoints/restorer_resnet50_layer2.pt に保存される
+   python scripts/train_restorer.py --config configs/train_restorer_ucf101.yaml
+   ```
+
+   エポックごとに `results.csv` に `train_loss` と、検証クリップでの復号誤差（ロスなしの復元特徴に対する相対誤差）
+   `val_rel_err`、hold だけの場合の `val_rel_err_hold`、その比 `val_ratio`（1 未満なら hold より良い）が出る。
+   検証の誤差が最も小さかったエポックの重みが残る
+
+2. 評価する。`configs/packet_loss_ucf101.yaml` の `schemes` に D+DZ+R の行がある（`restorer:` に重みのパス）。
+   学習していないときはこの行を消すかコメントアウトする
+
+   ```bash
+   python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
+   ```
+
+   D+DZ と D+DZ+R は符号化が同じなので、符号化は 1 回だけ行って使い回す
+
+確認ポイント:
+- 学習に使ったモデル（resnet50）と、使っていないモデル（efficientnet_v2_s / vgg16 / mobilenet_v2）での、D+DZ からの改善の差（汎用性）
+- 改善が大きいのはどの損失モデルか（`interleave: false` では 1 パケットのロスで数チャネル分がまるごと欠けるので、
+  他のチャネルの動きからどれだけ推定できるかが効く）
+- 学習時の損失（`losses`）に入れていない損失率・バースト長への汎化
+- 複数のモデルで学習した net（`targets` に複数書く）との比較
+
 ---
 
 ## 再現性のためのチェックリスト

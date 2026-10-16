@@ -7,6 +7,8 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
     head → 時系列符号化（端末）→ パケット分割 → ロス → 復号・concealment（クラウド）→ tail
 を行い、量子化もロスもない元モデルの出力との top-1 一致率（agreement）などを集計する。
 端末はロスを知らない（フィードバックなし）ので、DPCM のロスは次の I フレームまで伝搬する。
+方式に restorer（scripts/train_restorer.py で学習したロス補修 net）を指定すると、クラウド側で欠けた要素を補ってから
+tail に渡す（例: D+DZ+R）。
 
 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
@@ -60,6 +62,7 @@ from splitcomp.temporal import (
     build_loss_model,
     entropy_bits,
     frame_bytes,
+    load_restorer,
     num_packets,
     packet_assignment,
     received_mask,
@@ -124,15 +127,16 @@ def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
 
 
 @torch.no_grad()
-def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, acc: _Accumulator) -> None:
+def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, acc: _Accumulator, restorer=None) -> None:
     """符号化済みの 1 クリップにロスを起こして復号し、tail を通して acc に加算する。
 
     損失の乱数はクリップとシードで決まり、フレームごとに drop を 1 回呼ぶので、条件ごとに独立に再現できる。
+    restorer（LossRestorer）を渡すと、P フレームでロスが起きたときに欠けた要素を補う。
     """
     T = len(encoded.frames)
     P = encoded.num_packets
     loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
-    dec = TemporalDecoder(cfg.concealment)
+    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
 
     recon = torch.empty_like(feats)
     for t, frame in enumerate(encoded.frames):
@@ -307,6 +311,12 @@ def main() -> None:
         return
     if not args.resume:
         cfg.targets = select_targets(cfg.targets, args.target)
+    for s in cfg.schemes:
+        if s.restorer and not Path(s.restorer).exists():
+            raise SystemExit(
+                f"方式 {s.name} のロス補修 net {s.restorer} がありません。先に scripts/train_restorer.py で学習するか、"
+                f"設定の schemes からこの方式を外してください"
+            )
     set_seed(cfg.seed)
     threads = limit_cpu_threads()
     print(f"CPU スレッド数: {threads}")
@@ -330,6 +340,15 @@ def main() -> None:
         save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev), "cpu_threads": threads})
         print(f"結果の保存先: {run_dir}")
     print(f"途中で止まったら次のコマンドで再開できます: python scripts/packet_loss_sweep.py --resume {run_dir}")
+
+    # ロス補修 net は方式ごとに 1 回だけ読み込む（モデル共通なので全ての target で同じものを使う）
+    restorers = {s.name: load_restorer(s.restorer, tail_dev) for s in cfg.schemes if s.restorer}
+    for name, r in restorers.items():
+        print(f"{name}: ロス補修 net を使います（学習条件: {r.meta}）")
+
+    # 複数の方式で同じになる符号化（方式, P の量子化, ビット数）。クリップごとに 1 回だけ符号化して保持する
+    enc_count = Counter((s.scheme, s.p_quant) for s in cfg.schemes)
+    reused_encodings = {(sch, pq, b) for (sch, pq), n in enc_count.items() if n > 1 for b in cfg.bits}
 
     dataset = build_dataset(cfg.data)
     print(f"クリップ {len(dataset)} 本を評価します（GoP={cfg.gop}, MTU={cfg.mtu}, concealment={cfg.concealment}）")
@@ -370,14 +389,20 @@ def main() -> None:
                     ref_pred = model(x.to(tail_dev)).argmax(-1).cpu()
                     (feats,) = head(x.to(head_dev))
                 feats = feats.float().cpu()
+                shared: dict[tuple, EncodedClip] = {}
                 for scheme in cfg.schemes:
                     for bits in cfg.bits:
-                        # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す
-                        encoded = encode_clip(feats, cfg, scheme, bits)
+                        # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す。
+                        # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）の間でも使い回す
+                        enc_key = (scheme.scheme, scheme.p_quant, bits)
+                        encoded = shared.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
+                        if enc_key in reused_encodings:
+                            shared[enc_key] = encoded
                         for loss_cfg, seed in conditions:
                             key = (scheme.name, bits, loss_cfg.display_name(), seed)
-                            decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key])
+                            decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key], restorers.get(scheme.name))
                         del encoded
+                del shared
                 shape = list(feats.shape[1:])
                 save_checkpoint(run_dir, target, clip + 1, len(dataset), shape, accs)
                 print(f"  クリップ {clip + 1}/{len(dataset)} 完了（経過 {time.perf_counter() - started:.0f} 秒）", flush=True)

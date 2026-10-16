@@ -16,11 +16,15 @@ P フレームで送るものは方式によって違う:
 
     hold : 直前の f̂ の値を使う（P フレームでは差分 0 とみなすのと同じ）。直前がなければ 0
     zero : 0 にする
+
+    さらに restorer（:mod:`.restore` のロス補修 net など）を渡すと、P フレームでロスが起きたときに
+    hold で埋めた結果を restorer で補い、それを出力と復号器の状態（次のフレームの基準 f̂）の両方に使う。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 
@@ -95,12 +99,17 @@ class TemporalDecoder:
 
     Args:
         concealment: 届かなかった要素の補い方 "hold" / "zero"。
+        restorer: P フレームでロスが起きたときに欠けた要素を補う関数
+            ``(prev[C,H,W], cur[C,H,W], received[C,H,W]) -> 補った特徴[C,H,W]``
+            （例: :meth:`LossRestorer.restore <splitcomp.temporal.restore.LossRestorer.restore>`）。
+            cur のロスした要素は concealment によらず hold（= prev）で埋めて渡す。None なら使わない。
     """
 
-    def __init__(self, concealment: str = "hold"):
+    def __init__(self, concealment: str = "hold", restorer: Callable | None = None):
         if concealment not in CONCEALMENTS:
             raise KeyError(f"未知の concealment です: {concealment!r}（使えるもの: {CONCEALMENTS}）")
         self.concealment = concealment
+        self.restorer = restorer
         self.reset()
 
     def reset(self) -> None:
@@ -117,7 +126,11 @@ class TemporalDecoder:
         prev = self.prev_hat.flatten() if self.prev_hat is not None else torch.zeros_like(value)
         new = value if frame.kind == "I" else prev + value
         if received is not None:
-            fill = prev if self.concealment == "hold" else torch.zeros_like(value)
-            new = torch.where(received, new, fill)
+            if self.restorer is not None and frame.kind == "P" and self.prev_hat is not None:
+                cur = torch.where(received, new, prev).view(frame.shape)
+                new = self.restorer(self.prev_hat, cur, received.view(frame.shape)).flatten()
+            else:
+                fill = prev if self.concealment == "hold" else torch.zeros_like(value)
+                new = torch.where(received, new, fill)
         self.prev_hat = new.view(frame.shape)
         return self.prev_hat
