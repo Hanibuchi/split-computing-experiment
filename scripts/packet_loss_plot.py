@@ -29,10 +29,9 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 # 方式の表示順と色・マーカー（すべての図で共通）
-SCHEMES = ["F+Sym", "DwD+Sym", "D+Sym", "D+DZ"]
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
-    "DwD+Sym": {"color": "#eb6834", "marker": "s"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
     "D+DZ": {"color": "#eda100", "marker": "D"},
 }

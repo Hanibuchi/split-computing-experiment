@@ -35,10 +35,9 @@ devices:
   head: auto
   tail: auto
 
-# 比較する方式（論文の F+Sym / D+Sym / D+DZ と、ドリフトありの DwD）
+# 比較する方式（論文の F+Sym / D+Sym / D+DZ）
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
-  - {name: DwD+Sym, scheme: dwd, p_quant: sym}
   - {name: D+Sym, scheme: dpcm, p_quant: sym}
   - {name: D+DZ, scheme: dpcm, p_quant: dz}
 
@@ -61,7 +60,9 @@ losses:
   - {name: gilbert_elliott, p: 0.1, burst_len: 4}
   - {name: gilbert_elliott, p: 0.2, burst_len: 4}
   - {name: frame, p: 0.01}
+  - {name: frame, p: 0.02}
   - {name: frame, p: 0.05}
   - {name: frame, p: 0.1}
+  - {name: frame, p: 0.2}
 
 seeds: [0, 1, 2]
