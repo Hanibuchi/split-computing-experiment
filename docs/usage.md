@@ -14,6 +14,8 @@ python scripts/<スクリプト>.py --config <設定.yaml> [key=value ...]
 - 値は YAML として解釈されます: `true` / `null` / `[1, 2]` / `{a: 1}`
 - **zsh では `[` `]` を含む値は引用符で囲んでください**: `'data.kwargs.input_shape=[3,32,32]'`
 - 存在しない項目名を書くとエラーになります（タイプミス防止）。
+- YAML の最上位に `base: 別の設定.yaml`（その YAML のフォルダからの相対パス）を書くと、その設定を読んだうえで書いた項目だけを上書きします。
+  dict は項目ごとにマージし、list は丸ごと置き換えます（例: `configs/packet_loss_ucf101_quick.yaml`）。
 - 使える項目と意味は `src/splitcomp/config.py` に全て書いてあります。`--help` でも概要を表示します。
 
 実行のたびに `runs/<experiment_name>_<日時>/` が作られ、次のファイルが保存されます。

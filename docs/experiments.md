@@ -141,7 +141,12 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
    （7GB 全体は落とさない）
 2. 動作確認:
    `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'`
-3. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
+3. 新手法を試す段階（お試し）: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml`
+   - 本番の設定を `base:` で読み、モデルを resnet50 / vgg16 の 2 つ、損失を Gilbert-Elliott（と基準の no_loss）だけに減らしたもの。
+     方式・ビット数・クリップ数・シードは本番と同じ（方式を足すときは本番の設定に書けば、お試し側にも反映される）
+   - 損失・シードの組は 46 → 16 通り。結果は `runs/packet_loss_ucf101_quick_<日時>/` に出るので本番と混ざらない
+   - `--scheme D+DZ --scheme D+DZ+R` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
+4. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
    （時間がかかるので、ssh で動かすなら tmux の中で）
 
 実行時間について:
