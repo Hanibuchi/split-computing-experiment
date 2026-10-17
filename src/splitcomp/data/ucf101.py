@@ -94,9 +94,15 @@ UCF101_CLASSES = sorted(
 )
 
 
+#: 小文字のクラス名 → 正式なクラス名。動画名とクラス名で大文字・小文字が違うものがあるため
+#: （例: フォルダ HandstandPushups の中の動画は v_HandStandPushups_g01_c01.avi）。
+_CLASS_BY_LOWER = {c.lower(): c for c in UCF101_CLASSES}
+
+
 def class_of(video: str) -> str:
-    """動画名 ``v_<クラス名>_gXX_cYY`` からクラス名を取り出す。"""
-    return video[2:].rsplit("_", 2)[0]
+    """動画名 ``v_<クラス名>_gXX_cYY`` からクラス名（UCF101_CLASSES の表記）を取り出す。"""
+    name = video[2:].rsplit("_", 2)[0]
+    return _CLASS_BY_LOWER.get(name.lower(), name)
 
 
 def group_of(video: str) -> int:

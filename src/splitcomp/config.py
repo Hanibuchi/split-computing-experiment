@@ -190,7 +190,8 @@ class TemporalSchemeConfig:
 class SplitTarget:
     """評価するモデルと分割点の組。"""
 
-    model: ModelConfig = field(default_factory=ModelConfig)
+    #: 既定の split_point "layer2" が分割点として現れるよう、trace_depth=1 にしておく
+    model: ModelConfig = field(default_factory=lambda: ModelConfig(trace_depth=1))
     split_point: str = "layer2"
 
 
