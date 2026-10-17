@@ -14,6 +14,7 @@ UCF-101 は 101 種類の動作（クラス）の動画データセットで、�
     "paper"  : :data:`PAPER_CLIPS` の 30 本（既定）。Shiba et al. (IEEE Access 2026) §V-B と同じ条件を狙ったもの
     "random" : seed で num_clips クラスを選び、各クラスから動画を clips_per_class 本ずつ選ぶ。
                groups で撮影グループを絞れる（例: "8-25" = 公式 split 1 の train 側。評価用の g01 と重ならない）
+               clip_len に満たない動画（UCF-101 にまれにある）は読み込み時に除外する
 
 1 要素 = 1 クリップで ``(frames[T, 3, size, size], label)`` を返す（label は 101 クラスのアルファベット順の番号）。
 各動画の先頭から clip_len フレームを（frame_step おきに）取り出す。frame_step=2 で時間間隔が 2 倍（論文の 15fps 実験）。
@@ -190,6 +191,20 @@ class UCF101Clips(Dataset):
             members = [f"UCF-101/{p.parent.name}/{p.name}" for p in missing]
             fetch_zip_members(UCF101_ZIP_URLS, members, self.base.parent)
 
+        # random で選んだ動画はまれに clip_len より短いので、ここで 1 回読んで外す（読んだ結果はキャッシュに残る）
+        if selection == "random":
+            kept = []
+            for i, clip in enumerate(self.clips):
+                try:
+                    self._load_u8(i)
+                except _TooShortError as e:
+                    print(f"除外: {e}")
+                    continue
+                kept.append(clip)
+            if not kept:
+                raise ValueError(f"clip_len={clip_len} フレーム以上ある動画がありません")
+            self.clips = kept
+
     def _find(self, cls: str, video: str) -> Path | None:
         """手元にある動画（またはフレームのディレクトリ）を探す。"""
         for p in [self.base / cls / video, *(self.base / cls / f"{video}{e}" for e in _VIDEO_EXTS)]:
@@ -233,7 +248,14 @@ class UCF101Clips(Dataset):
         return self.clips[i][1].stem
 
     def __getitem__(self, i: int):
-        _, path, label = self.clips[i]
+        x = self._load_u8(i)
+        mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+        std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
+        return (x.float() / 255.0 - mean) / std, self.clips[i][2]
+
+    def _load_u8(self, i: int) -> torch.Tensor:
+        """i 番目のクリップを (T, 3, size, size) uint8 で返す（キャッシュがあればそれを使い、なければ作る）。"""
+        path = self.clips[i][1]
         cache_path = None
         if self.cache_dir is not None:
             cache_path = self.cache_dir / f"{path.stem}_T{self.clip_len}_s{self.frame_step}_{self.size}_u8.pt"
@@ -242,7 +264,7 @@ class UCF101Clips(Dataset):
         else:
             frames = _read_frames(path, self.clip_len * self.frame_step)[:: self.frame_step]  # (T, H, W, 3) uint8
             if len(frames) < self.clip_len:
-                raise ValueError(f"{path} のフレーム数が足りません（{len(frames)} < {self.clip_len}）")
+                raise _TooShortError(f"{path} のフレーム数が足りません（{len(frames)} < {self.clip_len}）")
             x = frames.permute(0, 3, 1, 2).float()
             x = F.interpolate(x, size=(self.size, self.size), mode="bilinear", align_corners=False, antialias=True)
             # キャッシュは uint8 で持つ（float32 の 1/4 の容量）。キャッシュの有無で入力が変わらないよう、常にここで丸める
@@ -250,9 +272,12 @@ class UCF101Clips(Dataset):
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(x, cache_path)
-        mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
-        std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
-        return (x.float() / 255.0 - mean) / std, label
+        return x
+
+
+class _TooShortError(ValueError):
+    """動画のフレーム数が clip_len に足りない。"""
+
 
 def _read_frames(path: Path, n: int) -> torch.Tensor:
     """動画（またはフレーム画像のディレクトリ）の先頭 n フレームを (n, H, W, 3) uint8 で読む。"""
