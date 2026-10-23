@@ -150,7 +150,7 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
    （時間がかかるので、ssh で動かすなら tmux の中で）
 
 実行時間について:
-- 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー）は損失条件によらないので、
+- 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）は損失条件によらないので、
   クリップごとに (方式, ビット数) ごとに 1 回だけ行い、全ての損失条件・シード（既定の設定で 46 通り）で使い回す。
   以前は損失条件ごとに符号化し直していた。結果は以前の版と完全に一致する（`tests/test_temporal.py` で確認している）。
   ResNet50/layer2 相当の特徴で、CPU 側の処理が約 10 倍速くなる
@@ -210,7 +210,17 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 モデル:
 - GoP（`gop` フレーム）の先頭が I フレーム（特徴を対称量子化）、残りが P フレーム
 - P フレームで送るもの: FD は特徴そのもの、DwD は真の差分、DPCM は予測残差
-- 量子化インデックスは b ビット固定長で、MTU ごとのパケットに分割する（各パケット単体で復号できる）
+- 量子化インデックスは、全ての方式で常にパケットごとに独立した適応算術符号でエントロピー符号化し、
+  MTU に収まるだけ詰める（`splitcomp.temporal.packet.entropy_layout`。学習用の `train_restorer.py` も同じ）
+  - 各パケットの先頭で頻度表を初期化する（全 2^b 記号のカウントを 1 から始める Laplace 推定）ので、
+    付加情報なしでパケット単体で復号でき、ロスしたパケットの要素だけが欠ける。
+    パケットをまたいで符号化すると 1 パケットのロスでフレーム全体が壊れるので、そうはしない
+  - 実際のビット列は作らず、符号長を閉じた式で正確に計算して詰める。
+    ヘッダは 21 バイト（フレーム番号・種類・連番・パケット数・オフセット・q・要素数）、符号の終端として 2 バイトを足す
+  - パケット数はフレームの中身で変わる（dead-zone 量子化の P フレームなどは少なくなる）。そのため、同じパケット損失率でも
+    フレーム内で欠ける要素の割合やロスの分布が方式ごとに違う
+  - 以前の版（b ビット固定長で詰めていた）の結果とは、`packets_per_frame` / `bytes_per_frame` とロスのパターンが違うので、
+    ロスありの一致率は直接比べられない（ロスなしの一致率は同じ）
 - 損失モデル（`losses`）: `bernoulli` / `gilbert_elliott`（`burst_len`）/ `frame`
 - 届かなかった要素は `concealment` で補う。`hold` は直前の値（P フレームでは差分 0 と同じ）、`zero` は 0
 - 端末はロスを知らない。そのため DPCM では、ロスによる端末とクラウドの状態のずれが次の I フレームまで残る
@@ -218,7 +228,11 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 出力:
 - `results.csv`: 条件（モデル × 方式 × ビット数 × 損失）ごとに、`agreement`（量子化・ロスなしの元モデルとの
   top-1 一致率）、`agreement_ci95`、`agreement_drop`（同じ方式のロスなしとの差）、`feature_mse`、
-  `loss_rate`（実際のパケット損失率）、`bytes_per_frame`、`entropy_bpe`
+  `loss_rate`（実際のパケット損失率）、`packets_per_frame`、`bytes_per_frame`、`entropy_bpe`、`coding`
+  - `bytes_per_frame` は、パケットごとに適応算術符号で符号化したときに実際に送るバイト数（ヘッダ込み）。
+    `coding` は符号化の種類（今は常に `adaptive_ac`。`packet_loss_plot.py` が古い固定長の結果と見分けるのに使う）
+  - `entropy_bpe` はフレーム全体の 0 次エントロピー [bit/要素] で、理想的なエントロピー符号化の参考値。
+    パケットごとに符号化すると、ヘッダ・終端・パケットごとの頻度表の学習の分だけ `entropy_bpe × 要素数 / 8` より大きくなる
 - `gop_curve.csv`: GoP 内の位置ごとの `agreement` / `feature_mse`。ロスの伝搬が見える
 
 図と要約表は `packet_loss_plot.py` で作れる（`pip install -e ".[analysis]"` が必要）。上の 2 つから、

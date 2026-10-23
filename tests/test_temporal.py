@@ -10,11 +10,15 @@ from splitcomp.compression.codecs import pack_bits
 from splitcomp.config import DataConfig, LossConfig
 from splitcomp.data import build_dataloader, build_dataset
 from splitcomp.temporal import (
+    AC_HEADER_BYTES,
+    AC_TAIL_BYTES,
     EncodedFrame,
     TemporalDecoder,
     TemporalEncoder,
+    adaptive_code_bits,
     build_loss_model,
     deadzone_quantize,
+    entropy_layout,
     frame_bytes,
     num_packets,
     packet_assignment,
@@ -134,6 +138,48 @@ def test_frame_bytes_matches_pack_bits():
     n, bits = 10_000, 3
     payload = sum(len(pack_bits(np.zeros(len(p), dtype=np.int64), bits)) for p in packetize(n, bits))
     assert frame_bytes(n, bits) == payload + 17 * num_packets(n, bits)
+
+
+def test_adaptive_code_bits_matches_sequential():
+    """閉じた式の符号長が、適応 Laplace モデルで 1 記号ずつ −log2 p を足したものと一致する。"""
+    K = 8
+    sym = torch.randint(0, K, (300,), generator=torch.Generator().manual_seed(0))
+    counts, total = np.ones(K), 0.0
+    for s in sym.tolist():
+        total -= np.log2(counts[s] / counts.sum())
+        counts[s] += 1
+    got = float(adaptive_code_bits(torch.bincount(sym, minlength=K)[None])[0])
+    assert got == pytest.approx(total, rel=1e-9)
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_entropy_layout_fits_mtu_and_covers_all(bits, interleave):
+    mtu, K = 200, 1 << bits
+    g = torch.Generator().manual_seed(bits)
+    idx = deadzone_quantize(torch.randn(20_000, generator=g) * 0.3, bits, 0.5)
+    layout = entropy_layout(idx, bits, mtu, interleave)
+    assert layout.assign.shape == idx.shape
+    assert int(layout.assign.max()) + 1 == layout.num_packets
+    sym = idx.long() + K // 2
+    counts = torch.bincount(layout.assign * K + sym, minlength=layout.num_packets * K).view(-1, K)
+    assert bool((counts.sum(1) > 0).all())  # 空のパケットがない
+    sizes = AC_HEADER_BYTES + torch.ceil(adaptive_code_bits(counts) / 8).long() + AC_TAIL_BYTES
+    assert int(sizes.max()) <= mtu
+    assert int(sizes.sum()) == layout.bytes
+    if not interleave:
+        assert bool((layout.assign[1:] >= layout.assign[:-1]).all())  # 先頭から順に詰まっている
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+def test_entropy_layout_shrinks_sparse_frames(interleave):
+    """0 ばかりの P フレームは、固定長より大幅に少ないパケット数・バイト数になる。"""
+    n, bits = 50_000, 4
+    idx = torch.zeros(n, dtype=torch.int32)
+    idx[::97] = 1
+    ac = entropy_layout(idx, bits, 1400, interleave)
+    assert ac.num_packets < num_packets(n, bits) / 5
+    assert ac.bytes < frame_bytes(n, bits) / 5
 
 
 def test_received_mask_drops_packet_elements():
@@ -446,27 +492,23 @@ def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cf
         TemporalEncoder,
         build_loss_model,
         entropy_bits,
-        frame_bytes,
-        num_packets,
-        packet_assignment,
+        entropy_layout,
         received_mask,
     )
 
     T = feats.shape[0]
-    n = feats[0].numel()
-    assign = packet_assignment(n, bits, cfg.mtu, cfg.interleave)
-    P = num_packets(n, bits, cfg.mtu)
     loss = build_loss_model(loss_cfg, sweep._clip_seed(seed, clip))
     enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
     dec = TemporalDecoder(cfg.concealment)
     recon = torch.empty_like(feats)
     for t in range(T):
         frame = enc.encode(feats[t])
-        lost = loss.drop(P)
-        recon[t] = dec.decode(frame, received_mask(lost, assign) if lost.any() else None)
+        layout = entropy_layout(frame.idx, bits, cfg.mtu, cfg.interleave)
+        lost = loss.drop(layout.num_packets)
+        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
         acc.lost_packets += int(lost.sum())
-        acc.packets += P
-        acc.bytes += frame_bytes(n, bits, cfg.mtu)
+        acc.packets += layout.num_packets
+        acc.bytes += layout.bytes
         acc.entropy += entropy_bits(frame.idx)
     pred = tail(recon).argmax(-1)
     agree = (pred == ref_pred).double()
