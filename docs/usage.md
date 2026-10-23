@@ -255,3 +255,57 @@ from splitcomp.temporal import TemporalDecoder, load_restorer
 restorer = load_restorer("checkpoints/restorer_resnet50_layer2.pt", device="cuda")
 dec = TemporalDecoder("hold", restorer=restorer.restore)
 ```
+
+## 7. `scripts/verify_shiba.py` — Shiba et al. (IEEE Access 2026) の再現検証
+
+```bash
+python scripts/verify_shiba.py                                              # 本番（12 条件 × 30 クリップ）
+python scripts/verify_shiba.py --target resnet50 --num-clips 2 --quick      # 動作確認（数分）
+python scripts/verify_shiba.py --out runs/verify_shiba_<日時>               # 途中で止まった実行の続き（終わった target は飛ばす）
+python scripts/verify_shiba.py --report-only runs/verify_shiba_<日時>       # 計算せず、報告書と図だけ作り直す
+```
+
+論文の Table 3, 5–13 と Fig. 4–11 を、この基盤の `splitcomp.temporal`（P99 量子化・dead-zone・FD / DwD / DPCM）で
+論文と同じ条件で計算し、論文の値（`src/splitcomp/temporal/paper_values.py` に書き写したもの）と並べて判定します。
+設定ファイルは使いません（条件は論文に固定）。手順と結果の見方は [experiments.md のレシピ 6](experiments.md) を参照。
+
+| オプション | 意味 |
+|---|---|
+| `--target NAME` | 計算する条件。モデル名（3 分割点ともに）・`モデル名/分割点`・`Eff-S3` などの略称・0〜11 の番号。複数回指定可 |
+| `--num-clips N` | クリップ数（既定は論文と同じ 30 本） |
+| `--quick` | θ = 0 だけにする（EfficientNetV2-S の Table 10–12 は計算する）。約 1/4 の時間になるが、480 条件の数え上げはできない |
+| `--no-15fps` | 15fps の統計（Fig. 4）を計算しない |
+| `--device` | `auto` / `cuda` / `mps` / `cpu` |
+| `--out DIR` | 保存先。既存のフォルダなら続きから |
+| `--report-only DIR` | 報告書と図だけ作り直す |
+| `--packet-loss-run DIR` | `packet_loss_sweep.py` の実行フォルダ。ロスなしの行（F+Sym / D+Sym）も Table 8 と比べる |
+
+出力（`runs/verify_shiba_<日時>/`）:
+
+- `raw/<モデル>_<分割点>.json`: target ごとの計算結果（target が終わるたびに書く）
+- `report/report.md`: 判定のまとめ、本文の主張の検証、表ごとの「論文 / 本実装 / 差 / 許容幅 / 判定」、DPCM / DwD の誤差の診断、図
+- `report/comparisons.csv`（比較の全行）、`conditions.csv`（条件ごとの一致率・エントロピー・zlib・スパース率・実測 α）、`stats.csv`（特徴の統計）
+- `report/fig4_rho_fps.png` 〜 `fig11_gop_length.png`: 論文の図と同じ形の図（論文の値は白抜きの記号や黒い横線で重ねる）
+- `report/diag_mse_vs_gop.png`: GoP 位置ごとの特徴の MSE（8-bit）。`table_scatter.png`: 全ての表の値の 論文 vs 本実装
+
+`conditions.csv` の主な列:
+
+| 列 | 意味 |
+|---|---|
+| `scheme` | `fd` / `dwd` / `dnd` / `dpcm` |
+| `mode` | `sym`（対称）/ `dz`（dead-zone。FD は全フレーム、差分の方式は P フレームだけ） |
+| `bits`, `theta`, `clip` | 量子化ビット数、スパース化しきい値 θ、範囲 R の決め方（`p99` / `max`） |
+| `agreement` | 元モデルとの top-1 一致率（クリップ数 × 30 フレーム） |
+| `H_all`, `H_P` | 量子化インデックスの 0 次エントロピー [bpe]。全フレームの平均 / P フレームだけの平均 |
+| `zlib_all`, `zlib_P` | zlib（level 6）で圧縮したときの bpe（b ∈ {4,6,8}, θ = 0, FD と DnD だけ） |
+| `sparsity`, `sparsity_P` | インデックスのうち 0 の割合 |
+| `alpha_meas` | 実測の DPCM の分散のオーバーヘッド Var(δ')/Var(δ) − 1 [%]（DPCM, θ = 0, P99） |
+
+量子化の範囲とスパース化は `splitcomp.temporal.quantize` の引数でも使えます（既定は P99・θ = 0 で、これまでと同じ）:
+
+```python
+from splitcomp.temporal import TemporalEncoder, quantize
+
+idx, q = quantize(x, bits=4, mode="dz", clip="max", theta=0.05)
+enc = TemporalEncoder("dpcm", bits=4, gop=30, p_quant="dz", clip="p99", theta=0.0)
+```

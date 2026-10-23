@@ -4,6 +4,8 @@
 - dead-zone 量子化: 0 のビンを 1.5 倍（|x| < 0.75q → 0）に広げ、それ以外のビン幅は q のまま。
   ここでは ``sign(x) · floor(|x| / q + 0.25)`` とし、[0.75q, 1.75q) → 1, [1.75q, 2.75q) → 2 ... とする。
 - 範囲 R は |x| の 99 パーセンタイル（P99）。範囲外の値はクリップされる。
+  ``clip="max"`` にすると R = max|x|（クリップしない。論文の Table 11/12 の比較用）。
+- スパース化しきい値 θ（論文の §V-D）: θ > 0 なら |x| < θ·R の値を量子化の前に 0 にする。
 
 インデックスは b ビットで送れるように [-2^(b-1), 2^(b-1) - 1] に収める（送信時は +2^(b-1) して符号なしにする）。
 """
@@ -52,11 +54,32 @@ def dequantize(idx: torch.Tensor, q: float) -> torch.Tensor:
 QUANTIZERS = {"sym": symmetric_quantize, "dz": deadzone_quantize}
 
 
-def quantize(x: torch.Tensor, bits: int, mode: str = "sym") -> tuple[torch.Tensor, float]:
-    """P99 で範囲を決めて量子化し、(インデックス, ステップ幅 q) を返す。"""
+CLIPS = ("p99", "max")
+
+
+def clip_range(x: torch.Tensor, clip: str = "p99") -> float:
+    """量子化の範囲 R。"p99": |x| の 99 パーセンタイル / "max": |x| の最大値（全て 0 のときは 1e-8）。"""
+    if clip == "p99":
+        return p99_range(x)
+    if clip == "max":
+        return max(float(x.detach().abs().max()), 1e-8)
+    raise KeyError(f"未知のクリップ方式です: {clip!r}（使えるもの: {CLIPS}）")
+
+
+def quantize(x: torch.Tensor, bits: int, mode: str = "sym", clip: str = "p99", theta: float = 0.0) -> tuple[torch.Tensor, float]:
+    """範囲 R を決めて量子化し、(インデックス, ステップ幅 q) を返す。
+
+    Args:
+        mode: "sym"（対称）/ "dz"（dead-zone）。
+        clip: 範囲 R の決め方 "p99" / "max"。
+        theta: スパース化しきい値。|x| < theta·R の値は量子化の前に 0 にする（0 なら何もしない）。
+    """
     if mode not in QUANTIZERS:
         raise KeyError(f"未知の量子化方式です: {mode!r}（使えるもの: {sorted(QUANTIZERS)}）")
-    q = step_size(p99_range(x), bits)
+    R = clip_range(x, clip)
+    if theta > 0:
+        x = torch.where(x.abs() < theta * R, torch.zeros_like(x), x)
+    q = step_size(R, bits)
     return QUANTIZERS[mode](x, bits, q), q
 
 

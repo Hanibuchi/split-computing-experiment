@@ -30,7 +30,7 @@ from .packet import (
     received_mask,
     register_loss_model,
 )
-from .quantize import deadzone_quantize, dequantize, entropy_bits, p99_range, quantize, symmetric_quantize
+from .quantize import clip_range, deadzone_quantize, dequantize, entropy_bits, p99_range, quantize, symmetric_quantize
 from .restore import LossRestorer, load_restorer, save_restorer
 
 __all__ = [
@@ -60,6 +60,7 @@ __all__ = [
     "deadzone_quantize",
     "dequantize",
     "p99_range",
+    "clip_range",
     "entropy_bits",
     "LossRestorer",
     "load_restorer",

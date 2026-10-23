@@ -19,6 +19,7 @@ Split Computing の研究用基盤です。中間特徴の**圧縮**、**通信�
 | 通信 | 帯域・RTT から計算するシミュレーション と、TCP による実ネットワーク通信の両方 |
 | 計測 | head / encode / 通信 / decode / tail の各時間、送信データ量、圧縮率、精度（top-k）、元モデルとの一致度 |
 | 動画・パケットロス | 動画の中間特徴の時系列符号化（FD / DPCM、dead-zone 量子化）を、Bernoulli・バースト（Gilbert-Elliott）・フレーム単位のパケットロス下で評価（`scripts/packet_loss_sweep.py`）。UCF-101 は使う動画だけを自動でダウンロードする。モデルごとに分けて実行し、結果をまとめることもできる。途中で止まっても `--resume` で続きから再開できる。再学習なしでロスを補う、モデル共通のロス補修 net（D+DZ+R, `scripts/train_restorer.py`）も比較できる。パケットは常にパケットごとの適応算術符号でエントロピー符号化して送る |
+| 論文の再現検証 | Shiba et al. (IEEE Access 2026) の表・図（Table 3, 5–13, Fig. 4–11）を同じ条件で計算し、論文の値と並べて一致・不一致を判定する報告書と図を作る（`scripts/verify_shiba.py`） |
 | 学習 | 分割点にエンコーダ / デコーダ（ボトルネック）を挿入し、元モデルからの知識蒸留で学習 |
 | タスク非依存 | 分類以外のモデルでも動作（出力が dict のリストでも可）。指標は関数を渡して追加できる |
 
@@ -62,7 +63,7 @@ Python から直接使う最小例は [`examples/quickstart.py`](examples/quicks
 | [docs/usage.md](docs/usage.md) | 各スクリプトの使い方、設定ファイルの書き方、出力 CSV の各列の意味 |
 | [docs/architecture.md](docs/architecture.md) | 全体の構成と処理の流れ、各モジュール・クラスの役割 |
 | [docs/extending.md](docs/extending.md) | 独自モデル・データセット・圧縮方式・評価指標・損失の追加方法 |
-| [docs/experiments.md](docs/experiments.md) | 典型的な実験の進め方と結果の見方 |
+| [docs/experiments.md](docs/experiments.md) | 典型的な実験の進め方と結果の見方（レシピ 6: Shiba et al. の再現検証） |
 
 ## ディレクトリ構成
 
@@ -70,8 +71,8 @@ Python から直接使う最小例は [`examples/quickstart.py`](examples/quicks
 configs/            設定ファイルの例（各項目に日本語コメントあり）
 docs/               ドキュメント
 examples/           Python API の使用例
-scripts/            実験用スクリプト（list_splits / sweep / train_bottleneck / serve / client / packet_loss_sweep / train_restorer / merge_results / packet_loss_plot）
-  slurm/              研究室の Slurm クラスタ用（packet_loss.sbatch: パケットロス実験の配列ジョブ / prefetch.py: 事前ダウンロード）
+scripts/            実験用スクリプト（list_splits / sweep / train_bottleneck / serve / client / packet_loss_sweep / train_restorer / merge_results / packet_loss_plot / verify_shiba）
+  slurm/              研究室の Slurm クラスタ用（packet_loss.sbatch: パケットロス実験の配列ジョブ / verify_shiba.sbatch: 再現検証の配列ジョブ / prefetch.py: 事前ダウンロード）
 src/splitcomp/      ライブラリ本体
   split/              モデル分割（Splitter）と分割推論（SplitPipeline）
   compression/        圧縮方式（Codec）と学習型ボトルネック
@@ -79,7 +80,7 @@ src/splitcomp/      ライブラリ本体
   profiling/          時間計測
   metrics/            評価指標と結果の保存
   training/           ボトルネックの蒸留学習
-  temporal/           動画の時系列符号化（DPCM / dead-zone）、パケットロスのモデル、ロス補修 net
+  temporal/           動画の時系列符号化（DPCM / dead-zone）、パケットロスのモデル、ロス補修 net、論文の数値（paper_values.py）
   models/, data/      モデル・データセットの登録と構築
   config.py           設定項目の定義（全項目の説明あり）
 tests/              テスト
