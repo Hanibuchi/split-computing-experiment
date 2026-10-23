@@ -199,13 +199,13 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 - この機能を入れる前の版で作った実行フォルダ（`checkpoint.pkl` なし）も `--resume` できる。終わったモデルは飛ばし、途中だったモデルは最初からやり直す
 - 再開したフォルダも、そのまま `merge_results.py` に渡せる
 
-### Slurm クラスタ（研究室の ログインノード）で動かす
+### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
 GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ
 （D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
-以下はすべて ログインノード 上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
-ログインノード で作った venv・動画・結果がそのままジョブから見える）。
+以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
+ログインノードで作った venv・動画・結果がそのままジョブから見える）。
 
 1. 準備（最初の 1 回だけ）:
 
@@ -237,12 +237,12 @@ GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU �
 
    ノードの GPU が PyTorch から使えないと、CPU で黙って何倍も時間をかけないように、ジョブは計算を始める前にエラーで止まる
    （`.err` に `エラー: <ノード名> では PyTorch から GPU が使えません`）。
-   NVIDIA ドライバを更新してノードを再起動していないと、`nvidia-smi` が `Driver/library version mismatch` になってこうなる
+   例えば NVIDIA ドライバの更新後にノードを再起動していない場合は、`nvidia-smi` が `Driver/library version mismatch` になってこうなる
    （管理者に再起動を頼む）。それまでは、そのノードを外して投げる。各ノードで GPU が使えるかは `srun` で確かめられる:
 
    ```bash
-   srun -p GPU -w node-c0 nvidia-smi                          # GPU の一覧が出れば使える
-   sbatch --exclude=node-b scripts/slurm/packet_loss.sbatch     # 複数外すときは --exclude=node-b,node-c1
+   srun -p GPU -w <ノード名> nvidia-smi                         # GPU の一覧が出れば使える
+   sbatch --exclude=<ノード名> scripts/slurm/packet_loss.sbatch   # 複数外すときは --exclude=<ノード名1>,<ノード名2>
    ```
 
    CPU で実行してよいときは `ALLOW_CPU=1 sbatch ...` とする

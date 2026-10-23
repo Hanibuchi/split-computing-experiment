@@ -1,6 +1,6 @@
 #!/bin/bash
 # =====================================================================
-# packet_loss_sweep.py を研究室の Slurm クラスタ（ログインノード）で実行するジョブスクリプト。
+# packet_loss_sweep.py を研究室の Slurm クラスタで実行するジョブスクリプト。
 #   配列ジョブで、設定の targets の 1 つ（= 1 モデル）ずつを別々のジョブとして並列に動かす。
 #   結果は runs/<実験名>_<モデル名>_<日時>/ に出るので、全部終わったら scripts/merge_results.py でまとめる。
 #   手順の詳しい説明は docs/experiments.md の「Slurm クラスタで動かす」を参照。
@@ -25,7 +25,7 @@
 # =====================================================================
 
 #SBATCH -J packet_loss              # ジョブ名（squeue とログのファイル名に出る）
-#SBATCH -p GPU                      # GPU のあるノード（node-a, node-b, node-c）。GRES は未設定なので --gres は付けない
+#SBATCH -p GPU                      # GPU のあるノード。GRES は未設定なので --gres は付けない
 #SBATCH -N 1                        # ノード数
 #SBATCH -c 12                       # CPU コア数。指定しないと 1 コアになり、符号化（CPU）が極端に遅くなる
 #SBATCH -t 2-00:00:00               # 時間制限（GPU パーティションの上限 2 日）。切れたら RESUME で再開する
