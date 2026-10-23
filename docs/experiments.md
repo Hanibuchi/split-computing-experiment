@@ -202,7 +202,7 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### Slurm クラスタ（研究室の ログインノード）で動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 1 日で投げる。方式は既定で F+Sym / D+Sym / D+DZ
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ
 （D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
 以下はすべて ログインノード 上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノード で作った venv・動画・結果がそのままジョブから見える）。
@@ -224,7 +224,8 @@ GPU パーティション（`-p GPU`）・12 コア・時間制限 1 日で投�
    cat runs/slurm/packet_loss_*_1.out       # 使ったノード・GPU・結果の表
    ```
 
-   `.out` の最初のほうに `CPU スレッド数: 12` のように出る。1 なら `-c` が効いていない。
+   `.out` の最初のほうに `CPU スレッド数: 12` と `デバイス: head=cuda, tail=cuda` のように出る。
+   スレッド数が 1 なら `-c` が効いていない。
    GRES が未設定なので、GPU は同じノードの他のジョブと共有になることがある（`nvidia-smi` の出力で使用状況が分かる）
 
 3. 本番（4 モデルを並列に）:
@@ -234,7 +235,19 @@ GPU パーティション（`-p GPU`）・12 コア・時間制限 1 日で投�
    tail -f runs/slurm/packet_loss_<ジョブID>_*.err   # 進捗バー
    ```
 
-4. 1 日の制限で切れた（`.err` に `DUE TO TIME LIMIT`）ら、`.out` に出ている実行フォルダを指定して、同じ番号で投げ直す:
+   ノードの GPU が PyTorch から使えないと、CPU で黙って何倍も時間をかけないように、ジョブは計算を始める前にエラーで止まる
+   （`.err` に `エラー: <ノード名> では PyTorch から GPU が使えません`）。
+   NVIDIA ドライバを更新してノードを再起動していないと、`nvidia-smi` が `Driver/library version mismatch` になってこうなる
+   （管理者に再起動を頼む）。それまでは、そのノードを外して投げる。各ノードで GPU が使えるかは `srun` で確かめられる:
+
+   ```bash
+   srun -p GPU -w node-c0 nvidia-smi                          # GPU の一覧が出れば使える
+   sbatch --exclude=node-b scripts/slurm/packet_loss.sbatch     # 複数外すときは --exclude=node-b,node-c1
+   ```
+
+   CPU で実行してよいときは `ALLOW_CPU=1 sbatch ...` とする
+
+4. 2 日の制限で切れた（`.err` に `DUE TO TIME LIMIT`）ら、`.out` に出ている実行フォルダを指定して、同じ番号で投げ直す:
 
    ```bash
    RESUME=runs/packet_loss_ucf101_vgg16_20261023-120000 sbatch --array=2 scripts/slurm/packet_loss.sbatch
@@ -251,7 +264,7 @@ GPU パーティション（`-p GPU`）・12 コア・時間制限 1 日で投�
 
 - 設定ファイルは `CONFIG=configs/packet_loss_ucf101_quick.yaml` で変えられる（quick は target が 2 つなので `--array=0-1`）
 - 実行されるコマンドは `DRY_RUN=1 SLURM_ARRAY_TASK_ID=1 bash scripts/slurm/packet_loss.sbatch` で確認できる
-- 他の環境変数（`EXTRA` / `SCHEMES` / `VENV`）はスクリプトの先頭のコメントを参照
+- 他の環境変数（`EXTRA` / `SCHEMES` / `VENV` / `ALLOW_CPU`）はスクリプトの先頭のコメントを参照
 
 使う動画（`selection: paper`、`src/splitcomp/data/ucf101.py` の `PAPER_CLIPS`）:
 - 論文には「UCF-101 の 5 カテゴリにまたがる 30 クリップ・各 30 連続フレーム」としか書かれておらず、
