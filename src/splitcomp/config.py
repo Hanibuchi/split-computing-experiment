@@ -313,7 +313,8 @@ class PacketLossConfig:
     bits: list[int] = field(default_factory=lambda: [4])
     #: GoP 長 K（I フレームの間隔）。
     gop: int = 30
-    #: 1 パケットの最大サイズ [バイト]（アプリケーション層のヘッダ込み）。
+    #: 1 パケットの最大サイズ [バイト]（アプリケーション層のヘッダ込み）。量子化インデックスはパケットごとに
+    #: 独立した適応算術符号でエントロピー符号化し、この大きさに収まるだけ詰める（splitcomp.temporal.packet 参照）。
     mtu: int = 1400
     #: true で要素をパケットに交互に振り分ける（ロスを空間的に分散させる）。
     interleave: bool = False

@@ -10,12 +10,14 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 方式に restorer（scripts/train_restorer.py で学習したロス補修 net）を指定すると、クラウド側で欠けた要素を補ってから
 tail に渡す（例: D+DZ+R）。
 
-端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー）はロスによらないので、
+端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
 torch の CPU スレッド数は、ジョブに割り当てられたコア数（os.sched_getaffinity）を超えないように調整する。
 
 出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
+                   送信量（packets_per_frame, bytes_per_frame）は、量子化インデックスをパケットごとに独立した
+                   適応算術符号で符号化したときの値（splitcomp.temporal.packet.entropy_layout）
     gop_curve.csv  GoP 内の位置 t ごとの agreement と特徴 MSE（誤差伝搬の様子）
     *.jsonl        同じ内容。モデル 1 つ分が終わるたびに追記されるので、途中で止まっても終わった分は残る
     checkpoint.pkl 実行中のモデルの途中経過（クリップ 1 本ごとに保存。モデルが終わると消える）
@@ -63,11 +65,10 @@ from splitcomp.temporal import (
     TemporalDecoder,
     TemporalEncoder,
     build_loss_model,
+    PacketLayout,
     entropy_bits,
-    frame_bytes,
+    entropy_layout,
     load_restorer,
-    num_packets,
-    packet_assignment,
     received_mask,
 )
 from splitcomp.utils import format_table, resolve_device, set_seed
@@ -99,34 +100,24 @@ def _clip_seed(seed: int, clip: int) -> int:
 class EncodedClip:
     """1 クリップを端末側で符号化した結果（損失条件によらないので、全ての損失条件で使い回す）。"""
 
-    def __init__(self, frames: list, entropy: list[float], frame_bytes: int, assign: torch.Tensor, num_packets: int):
+    def __init__(self, frames: list, entropy: list[float], layouts: list[PacketLayout]):
         #: フレームごとの送信内容（EncodedFrame）
         self.frames = frames
         #: フレームごとのエントロピー [bit/要素]
         self.entropy = entropy
-        #: 1 フレームの送信バイト数（ヘッダ込み）
-        self.frame_bytes = frame_bytes
-        #: 各要素が入るパケットの番号
-        self.assign = assign
-        #: 1 フレームのパケット数
-        self.num_packets = num_packets
+        #: フレームごとのパケット分割（パケットごとの適応算術符号）
+        self.layouts = layouts
 
 
 def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
-    """1 クリップ（T フレーム）を端末側で符号化する（I/P の判定・差分の計算・量子化）。
+    """1 クリップ（T フレーム）を端末側で符号化する（I/P の判定・差分の計算・量子化・パケット分割）。
 
     端末はロスを知らないので、結果は損失モデル・シードによらない。
     """
-    n = feats[0].numel()
     enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
     frames = [enc.encode(feats[t]) for t in range(feats.shape[0])]
-    return EncodedClip(
-        frames,
-        entropy=[entropy_bits(f.idx) for f in frames],
-        frame_bytes=frame_bytes(n, bits, cfg.mtu),
-        assign=packet_assignment(n, bits, cfg.mtu, cfg.interleave),
-        num_packets=num_packets(n, bits, cfg.mtu),
-    )
+    layouts = [entropy_layout(f.idx, bits, cfg.mtu, cfg.interleave) for f in frames]
+    return EncodedClip(frames, entropy=[entropy_bits(f.idx) for f in frames], layouts=layouts)
 
 
 @torch.no_grad()
@@ -137,18 +128,17 @@ def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss
     restorer（LossRestorer）を渡すと、P フレームでロスが起きたときに欠けた要素を補う。
     """
     T = len(encoded.frames)
-    P = encoded.num_packets
     loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
     dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
 
     recon = torch.empty_like(feats)
-    for t, frame in enumerate(encoded.frames):
-        lost = loss.drop(P)
-        recon[t] = dec.decode(frame, received_mask(lost, encoded.assign) if lost.any() else None)
+    for t, (frame, layout) in enumerate(zip(encoded.frames, encoded.layouts)):
+        lost = loss.drop(layout.num_packets)
+        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
         acc.lost_packets += int(lost.sum())
         acc.entropy += encoded.entropy[t]  # 以前の版と同じ順に足す（浮動小数点の和を一致させるため）
-    acc.packets += P * T
-    acc.bytes += encoded.frame_bytes * T
+        acc.packets += layout.num_packets
+        acc.bytes += layout.bytes
 
     pred = tail(recon.to(tail_dev)).argmax(-1).cpu()
     agree = (pred == ref_pred).double()
@@ -460,6 +450,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "feature_shape": "x".join(map(str, shape)),
                 "scheme": scheme,
                 "bits": bits,
+                "coding": "adaptive_ac",  # パケットの符号化（packet_loss_plot.py が古い固定長の結果と見分ける用）
                 "gop": cfg.gop,
                 "loss": loss,
                 "loss_model": lc.name,
