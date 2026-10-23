@@ -9,20 +9,30 @@ P フレームで送るものは方式によって違う:
 
 （論文の DnD はクラウドが真の f_{t−1} を持つ理想化なので、パケットロスの評価では扱わない。）
 
+多系列化（streams = n）:
+    P フレームの参照先を直前 f_{t−1} ではなく n フレーム前 f_{t−n} にする。フレームは GoP 内の位置 t mod n で
+    n 本の独立な系列に分かれ、DPCM のロスはその系列のフレームにしか伝搬しない（代わりに参照が時間的に遠くなり、
+    差分が大きくなるので、同じビット数では量子化誤差が増える）。I フレームは GoP 先頭の 1 枚だけで、GoP 内の位置 1..n−1 は I フレームを
+    参照する。つまり参照フレームは max(t − n, GoP 先頭)。n = 1 が通常の DPCM。
+
+    例（n = 2, GoP = 6）:  0(I) ← 1, 0 ← 2 ← 4,  1 ← 3 ← 5
+
 パケットロスの扱い:
     端末（:class:`TemporalEncoder`）はロスを知らない（フィードバックなし）。そのため DPCM でロスが起きると
     端末とクラウドの f̂ がずれ、そのずれは次の I フレームまで残る。
     クラウド（:class:`TemporalDecoder`）は届かなかった要素を concealment で補う:
 
-    hold : 直前の f̂ の値を使う（P フレームでは差分 0 とみなすのと同じ）。直前がなければ 0
+    hold : P フレームでは参照フレームの f̂ の値を使う（差分 0 とみなすのと同じ。n = 1 なら直前の f̂）。
+           I フレームでは直前の f̂ の値を使う。直前がなければ 0
     zero : 0 にする
 
     さらに restorer（:mod:`.restore` のロス補修 net など）を渡すと、P フレームでロスが起きたときに
-    hold で埋めた結果を restorer で補い、それを出力と復号器の状態（次のフレームの基準 f̂）の両方に使う。
+    hold で埋めた結果を restorer で補い（prev には参照フレームの f̂ を渡す）、それを出力と復号器の状態（次のフレームの基準 f̂）の両方に使う。
 """
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
@@ -48,6 +58,8 @@ class EncodedFrame:
     q: float
     #: 元の特徴の形
     shape: tuple
+    #: P フレームの参照フレーム番号（I フレームは None）
+    ref: int | None = None
 
 
 class TemporalEncoder:
@@ -60,42 +72,64 @@ class TemporalEncoder:
         p_quant: P フレームの量子化方式 "sym" / "dz"。I フレームは常に対称量子化。
         clip: 量子化の範囲 R の決め方 "p99" / "max"（I/P 共通）。
         theta: スパース化しきい値（|x| < theta·R を量子化前に 0 にする。I/P 共通）。
+        streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
     """
 
-    def __init__(self, scheme: str, bits: int, gop: int = 30, p_quant: str = "sym", clip: str = "p99", theta: float = 0.0):
+    def __init__(
+        self,
+        scheme: str,
+        bits: int,
+        gop: int = 30,
+        p_quant: str = "sym",
+        clip: str = "p99",
+        theta: float = 0.0,
+        streams: int = 1,
+    ):
         if scheme not in SCHEMES:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
+        if streams < 1:
+            raise ValueError(f"streams は 1 以上にしてください（{streams}）")
         self.scheme = scheme
         self.bits = bits
         self.gop = gop
         self.p_quant = p_quant
         self.clip = clip
         self.theta = theta
+        self.streams = streams
         self.reset()
 
     def reset(self) -> None:
         self.t = 0
-        self.prev_true: torch.Tensor | None = None  # f_{t−1}（dwd 用）
-        self.prev_hat: torch.Tensor | None = None  # 端末が想定するクラウドの f̂_{t−1}（dpcm 用）
+        self.prev_true: torch.Tensor | None = None  # f_{t−1}
+        self.prev_hat: torch.Tensor | None = None  # 端末が想定するクラウドの f̂_{t−1}
+        # 直近 streams フレーム分の (f, f̂)。末尾が t−1（参照フレームを取り出す用）
+        self.history: deque[tuple[torch.Tensor, torch.Tensor]] = deque(maxlen=self.streams)
 
     def is_intra(self, t: int) -> bool:
         return self.scheme == "fd" or t % self.gop == 0
+
+    def ref_index(self, t: int) -> int:
+        """P フレーム t の参照フレーム番号 max(t − streams, GoP 先頭)。"""
+        return max(t - self.streams, t - t % self.gop)
 
     def encode(self, f: torch.Tensor) -> EncodedFrame:
         t = self.t
         if self.is_intra(t):
             idx, q = quantize(f, self.bits, "sym", self.clip, self.theta)
             recon = dequantize(idx, q)
-            kind = "I"
+            kind, ref = "I", None
         else:
-            base = self.prev_true if self.scheme == "dwd" else self.prev_hat
+            ref = self.ref_index(t)
+            ref_true, ref_hat = self.history[ref - t]  # ref − t ∈ [−streams, −1]
+            base = ref_true if self.scheme == "dwd" else ref_hat
             idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta)
-            recon = self.prev_hat + dequantize(idx, q)
+            recon = ref_hat + dequantize(idx, q)
             kind = "P"
         self.prev_true = f
         self.prev_hat = recon
+        self.history.append((f, recon))
         self.t += 1
-        return EncodedFrame(t, kind, idx.flatten(), q, tuple(f.shape))
+        return EncodedFrame(t, kind, idx.flatten(), q, tuple(f.shape), ref)
 
 
 class TemporalDecoder:
@@ -106,7 +140,10 @@ class TemporalDecoder:
         restorer: P フレームでロスが起きたときに欠けた要素を補う関数
             ``(prev[C,H,W], cur[C,H,W], received[C,H,W]) -> 補った特徴[C,H,W]``
             （例: :meth:`LossRestorer.restore <splitcomp.temporal.restore.LossRestorer.restore>`）。
-            cur のロスした要素は concealment によらず hold（= prev）で埋めて渡す。None なら使わない。
+            prev は参照フレームの f̂。cur のロスした要素は concealment によらず hold（= prev）で埋めて渡す。
+            None なら使わない。
+
+    復号器は各フレームの ``frame.ref`` を見て参照フレームを選ぶので、系列数 n を知らなくてよい。
     """
 
     def __init__(self, concealment: str = "hold", restorer: Callable | None = None):
@@ -118,6 +155,8 @@ class TemporalDecoder:
 
     def reset(self) -> None:
         self.prev_hat: torch.Tensor | None = None
+        # フレーム番号 → 復元した f̂。これから参照されうるフレームだけ残す
+        self.history: dict[int, torch.Tensor] = {}
 
     def decode(self, frame: EncodedFrame, received: torch.Tensor | None = None) -> torch.Tensor:
         """フレームを復元する。
@@ -127,14 +166,24 @@ class TemporalDecoder:
             received: 各要素が届いたかどうか（平らにした bool, 形は frame.idx と同じ）。None なら全て届いた。
         """
         value = dequantize(frame.idx, frame.q)
-        prev = self.prev_hat.flatten() if self.prev_hat is not None else torch.zeros_like(value)
+        if frame.kind == "I":
+            # I フレームのロスは直前の f̂ で埋める
+            base_hat = self.prev_hat
+        else:
+            # P フレームの参照（ref が無い古い形式のフレームは直前のフレームを参照する）
+            base_hat = self.history[frame.ref] if frame.ref is not None else self.prev_hat
+        prev = base_hat.flatten() if base_hat is not None else torch.zeros_like(value)
         new = value if frame.kind == "I" else prev + value
         if received is not None:
-            if self.restorer is not None and frame.kind == "P" and self.prev_hat is not None:
+            if self.restorer is not None and frame.kind == "P" and base_hat is not None:
                 cur = torch.where(received, new, prev).view(frame.shape)
-                new = self.restorer(self.prev_hat, cur, received.view(frame.shape)).flatten()
+                new = self.restorer(base_hat, cur, received.view(frame.shape)).flatten()
             else:
                 fill = prev if self.concealment == "hold" else torch.zeros_like(value)
                 new = torch.where(received, new, fill)
         self.prev_hat = new.view(frame.shape)
+        # 後のフレームの参照は ref 以降（I フレームなら自分以降）なので、それより古いフレームは捨てる
+        oldest = frame.t if frame.ref is None else frame.ref
+        self.history = {t: h for t, h in self.history.items() if t >= oldest}
+        self.history[frame.t] = self.prev_hat
         return self.prev_hat

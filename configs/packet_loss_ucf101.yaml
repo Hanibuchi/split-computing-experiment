@@ -39,11 +39,15 @@ devices:
 #   D+DZ+R: D+DZ のクラウド側に、モデル共通のロス補修 net を挟む（head / tail は再学習しない）。
 #           先に scripts/train_restorer.py で学習しておく（configs/train_restorer_ucf101.yaml → 下のパスに保存される）。
 #           学習していない場合は、この行を消すかコメントアウトする
+#   D+DZ+S2 / D+DZ+S5: 多系列 DPCM。P フレームが n フレーム前（GoP 内の位置 n 未満は GoP 先頭の I フレーム）を参照し、
+#           フレームが n 本の独立な系列に分かれる。ロスの伝搬がその系列だけに閉じる代わりに、差分が大きくなり量子化誤差が増える
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
   - {name: D+Sym, scheme: dpcm, p_quant: sym}
   - {name: D+DZ, scheme: dpcm, p_quant: dz}
   - {name: D+DZ+R, scheme: dpcm, p_quant: dz, restorer: checkpoints/restorer_resnet50_layer2.pt}
+  - {name: D+DZ+S2, scheme: dpcm, p_quant: dz, streams: 2}   # 2 系列（t は t−2 を参照）
+  - {name: D+DZ+S5, scheme: dpcm, p_quant: dz, streams: 5}   # 5 系列（t は t−5 を参照）
 
 bits: [2, 4, 8]
 gop: 30
