@@ -19,6 +19,7 @@
 #     RESUME   途中で止まった実行フォルダ。指定すると --resume で続きから再開する（CONFIG / SCHEMES は無視される）
 #     VENV     有効にする仮想環境（既定 .venv）
 #     DRY_RUN  1 にすると実行するコマンドを表示するだけで終わる（スクリプトの確認用）
+#     ALLOW_CPU 1 にすると、GPU が使えないノードでも CPU で実行する（既定では GPU が無ければエラーで止まる）
 #
 #   targets の番号は python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets で確認できる。
 # =====================================================================
@@ -27,7 +28,7 @@
 #SBATCH -p GPU                      # GPU のあるノード（node-a, node-b, node-c）。GRES は未設定なので --gres は付けない
 #SBATCH -N 1                        # ノード数
 #SBATCH -c 12                       # CPU コア数。指定しないと 1 コアになり、符号化（CPU）が極端に遅くなる
-#SBATCH -t 1-00:00:00               # 時間制限（パーティションの上限 1 日）。切れたら RESUME で再開する
+#SBATCH -t 2-00:00:00               # 時間制限（GPU パーティションの上限 2 日）。切れたら RESUME で再開する
 #SBATCH --array=0-3                 # 配列の番号 = 設定の targets の番号
 #SBATCH -o runs/slurm/%x_%A_%a.out  # 標準出力（%A: 配列ジョブ ID, %a: 配列の番号）
 #SBATCH -e runs/slurm/%x_%A_%a.err  # 標準エラー（進捗バーもここに出る）
@@ -71,7 +72,20 @@ fi
 
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
-nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv || echo "nvidia-smi がありません（CPU で動きます）"
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv || true
+
+# PyTorch から GPU が使えるか確かめる。ドライバの不整合（"Driver/library version mismatch"）などで使えないと、
+# devices: auto は黙って CPU になり、何倍も時間がかかる。そうなる前にエラーで止める
+if ! python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+    if [[ "${ALLOW_CPU:-0}" == 1 ]]; then
+        echo "警告: $(hostname -s) では GPU が使えません。ALLOW_CPU=1 なので CPU で実行します"
+    else
+        echo "エラー: $(hostname -s) では PyTorch から GPU が使えません（上の nvidia-smi の出力を確認）。" >&2
+        echo "  このノードを外して投げ直してください: sbatch --exclude=$(hostname -s) ... scripts/slurm/packet_loss.sbatch" >&2
+        echo "  CPU で実行してよい場合は ALLOW_CPU=1 を付けて投げてください" >&2
+        exit 1
+    fi
+fi
 
 "${cmd[@]}"
 echo "=== $(date '+%F %T') 終了"
