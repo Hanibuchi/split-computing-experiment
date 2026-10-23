@@ -68,6 +68,19 @@ def test_deadzone_widens_zero_bin():
     np.testing.assert_array_equal(symmetric_quantize(torch.tensor([0.49, 0.51]), 8, q).numpy(), [0, 1])
 
 
+def test_quantize_clip_max_and_theta():
+    x = torch.linspace(-10, 10, 2001)
+    # max: R = max|x| なので、q = 2R / 2^b
+    _, q = quantize(x, 4, "sym", clip="max")
+    assert q == pytest.approx(2 * 10 / 16)
+    _, q99 = quantize(x, 4, "sym")
+    assert q99 < q
+    # theta: |x| < θR の値は 0 になる。theta=0 は既定と同じ
+    idx, q = quantize(x, 8, "sym", clip="max", theta=0.2)
+    assert (idx[x.abs() < 2.0] == 0).all() and (idx[x.abs() > 2.1] != 0).all()
+    assert torch.equal(quantize(x, 4, "dz", theta=0.0)[0], quantize(x, 4, "dz")[0])
+
+
 # --- 符号化（ロスなし）--------------------------------------------------------
 
 

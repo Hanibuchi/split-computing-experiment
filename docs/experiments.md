@@ -372,6 +372,64 @@ D+DZ+R は再学習をしない代わりに、**クラウド側で復号のあ�
 
 ---
 
+## レシピ 6: Shiba et al. の結果を再現できるか確かめる
+
+**問い**: この基盤の時系列符号化（`splitcomp.temporal`）で、論文の表・図と同じ結果になるか？
+（レシピ 5 のパケットロス実験の前提が正しいかの確認）
+
+1. 動作確認（2 条件 × 2 クリップ、数分）:
+
+   ```bash
+   python scripts/verify_shiba.py --target RN-L2 --target Eff-S3 --num-clips 2 --quick
+   ```
+
+2. 本番（論文と同じ 12 条件 × 30 クリップ × 1,920 通り）:
+
+   ```bash
+   python scripts/verify_shiba.py
+   ```
+
+   - 時間の大半は tail の計算。M 系の Mac（MPS）で 8 時間ほど、CUDA の GPU ならずっと速い。
+     target が終わるたびに `raw/` に保存するので、止まっても `--out <実行フォルダ>` で続きから計算できる
+   - モデルごとに別のマシンで計算して、`raw/*.json` を 1 つのフォルダに集め、`--report-only` でまとめてもよい
+   - `--quick`（θ = 0 だけ）にすると約 1/4 の時間になる。Table 8・9 と図はほぼ全て作れるが、480 条件の数え上げは「—」になる
+
+   研究室の Slurm クラスタでは、`scripts/slurm/verify_shiba.sbatch` で 12 条件を別々のジョブとして並列に計算できる
+   （準備はレシピ 5 の「研究室の Slurm クラスタで動かす」の 1 と同じ。`prefetch.py` で動画 30 本と 4 モデルの重みがそろう）:
+
+   ```bash
+   mkdir -p runs/slurm
+   EXTRA="--num-clips 2 --quick" sbatch --array=4 scripts/slurm/verify_shiba.sbatch   # 動作確認（RN-L2 だけ）
+   sbatch scripts/slurm/verify_shiba.sbatch                                         # 本番（配列 0-11）
+   squeue -u $USER
+   python scripts/verify_shiba.py --report-only runs/verify_shiba_<配列ジョブ ID>     # 全て終わったら報告書
+   ```
+
+   - 全てのジョブが同じ `runs/verify_shiba_<配列ジョブ ID>/raw/` に書く。報告書は最後に 1 回だけ作る（ジョブは `--no-report`）
+   - 失敗した条件だけ投げ直すときは、同じフォルダを `OUT=` で指定する:
+     `OUT=runs/verify_shiba_<配列ジョブ ID> sbatch --array=3,7 scripts/slurm/verify_shiba.sbatch`
+   - 配列の番号: 0-2 EfficientNetV2-S、3-5 ResNet-50、6-8 VGG-16、9-11 MobileNetV2（それぞれ浅い順）
+
+3. `report/report.md` を見る。
+
+   - 「判定のまとめ」: 表・図ごとの ✓（許容幅以内）/ △（2 倍以内）/ ✗ の数。許容幅は `verify_shiba.py` の `TOL`
+   - 「本文の主張の検証」: 「472/480 条件で DPCM ≥ FD」「D+DZ が 31/36 で有利」「α < 2%」などが本実装でも成り立つか
+   - 各表: 論文 / 本実装 / 差 / 判定。`table_scatter.png` で全体の傾向が分かる
+
+判定の読み方:
+
+- 論文の 30 クリップのリストは公開されていない（`PAPER_CLIPS` は推測）。特徴の統計（Table 7）や一致率は、
+  クリップの違いだけで 0.0x 程度はずれる。**個々の数値の一致より、大小関係と傾向（本文の主張）が再現できているか**を重視する
+- Fig. 4（15fps）と Fig. 8 の論文の値は図からの目での読み取りなので、許容幅を広くしている
+- 論文の書き写し（`paper_values.py`）は `tests/test_paper_values.py` で論文内の整合性を確かめている（Δ 列が差になっているか、Table 5/6 が Table 7 から計算できるか など）
+
+既知の差: 「診断」の節を見る。論文の記述どおり I フレームも P フレームも P99 でクリップすると、
+ReLU のモデルでは max|f| が P99 の 10 倍以上あり、I フレームで切られた大きな値の誤差が DPCM では少しずつしか戻らず、
+DwD では GoP の終わりまで残る。そのため DPCM / DwD の一致率が論文より低く出ることがある（DnD・FD には効かない）。
+`clip="max"` にすると DPCM は DnD とほぼ同じになる（`diag_mse_vs_gop.png` と Table 11）
+
+---
+
 ## 再現性のためのチェックリスト
 
 - [ ] 実行ディレクトリの `config.yaml` と `meta.json` を論文の実験記録と紐づけたか

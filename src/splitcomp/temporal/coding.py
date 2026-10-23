@@ -58,15 +58,19 @@ class TemporalEncoder:
         bits: 量子化ビット数（I/P 共通）。
         gop: GoP 長 K。
         p_quant: P フレームの量子化方式 "sym" / "dz"。I フレームは常に対称量子化。
+        clip: 量子化の範囲 R の決め方 "p99" / "max"（I/P 共通）。
+        theta: スパース化しきい値（|x| < theta·R を量子化前に 0 にする。I/P 共通）。
     """
 
-    def __init__(self, scheme: str, bits: int, gop: int = 30, p_quant: str = "sym"):
+    def __init__(self, scheme: str, bits: int, gop: int = 30, p_quant: str = "sym", clip: str = "p99", theta: float = 0.0):
         if scheme not in SCHEMES:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
         self.scheme = scheme
         self.bits = bits
         self.gop = gop
         self.p_quant = p_quant
+        self.clip = clip
+        self.theta = theta
         self.reset()
 
     def reset(self) -> None:
@@ -80,12 +84,12 @@ class TemporalEncoder:
     def encode(self, f: torch.Tensor) -> EncodedFrame:
         t = self.t
         if self.is_intra(t):
-            idx, q = quantize(f, self.bits, "sym")
+            idx, q = quantize(f, self.bits, "sym", self.clip, self.theta)
             recon = dequantize(idx, q)
             kind = "I"
         else:
             base = self.prev_true if self.scheme == "dwd" else self.prev_hat
-            idx, q = quantize(f - base, self.bits, self.p_quant)
+            idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta)
             recon = self.prev_hat + dequantize(idx, q)
             kind = "P"
         self.prev_true = f
