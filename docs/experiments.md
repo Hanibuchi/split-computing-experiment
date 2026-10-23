@@ -147,7 +147,7 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
    - 損失・シードの組は 46 → 16 通り。結果は `runs/packet_loss_ucf101_quick_<日時>/` に出るので本番と混ざらない
    - `--scheme D+DZ --scheme D+DZ+R` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
 4. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
-   （時間がかかるので、ssh で動かすなら tmux の中で）
+   （時間がかかるので、ssh で動かすなら tmux の中で。Slurm クラスタでは下の「Slurm クラスタで動かす」を参照）
 
 実行時間について:
 - 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）は損失条件によらないので、
@@ -198,6 +198,60 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 - 開始時に再開用のコマンドが表示される。何度止まっても同じコマンドで続けられる
 - この機能を入れる前の版で作った実行フォルダ（`checkpoint.pkl` なし）も `--resume` できる。終わったモデルは飛ばし、途中だったモデルは最初からやり直す
 - 再開したフォルダも、そのまま `merge_results.py` に渡せる
+
+### Slurm クラスタ（研究室の ログインノード）で動かす
+
+`scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
+GPU パーティション（`-p GPU`）・12 コア・時間制限 1 日で投げる。方式は既定で F+Sym / D+Sym / D+DZ
+（D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
+以下はすべて ログインノード 上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
+ログインノード で作った venv・動画・結果がそのままジョブから見える）。
+
+1. 準備（最初の 1 回だけ）:
+
+   ```bash
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -e ".[video,analysis]"
+   python scripts/slurm/prefetch.py   # 動画 30 本と 4 モデルの学習済み重みを先にダウンロード（ジョブ同士の競合を防ぐ）
+   mkdir -p runs/slurm                # ジョブのログの出力先（Slurm は作ってくれない）
+   ```
+
+2. 動作確認（target 1 番 = resnet50 を、クリップ 2 本・シード 1 個で）:
+
+   ```bash
+   EXTRA="data.kwargs.num_clips=2 seeds=[0]" sbatch --array=1 scripts/slurm/packet_loss.sbatch
+   squeue -u $USER                          # ST が R なら実行中、PD なら待ち
+   cat runs/slurm/packet_loss_*_1.out       # 使ったノード・GPU・結果の表
+   ```
+
+   `.out` の最初のほうに `CPU スレッド数: 12` のように出る。1 なら `-c` が効いていない。
+   GRES が未設定なので、GPU は同じノードの他のジョブと共有になることがある（`nvidia-smi` の出力で使用状況が分かる）
+
+3. 本番（4 モデルを並列に）:
+
+   ```bash
+   sbatch scripts/slurm/packet_loss.sbatch
+   tail -f runs/slurm/packet_loss_<ジョブID>_*.err   # 進捗バー
+   ```
+
+4. 1 日の制限で切れた（`.err` に `DUE TO TIME LIMIT`）ら、`.out` に出ている実行フォルダを指定して、同じ番号で投げ直す:
+
+   ```bash
+   RESUME=runs/packet_loss_ucf101_vgg16_20261023-120000 sbatch --array=2 scripts/slurm/packet_loss.sbatch
+   ```
+
+   `--array` の番号は何でもよい（RESUME では target は実行フォルダの config.yaml から決まる）が、ログを追いやすいので同じ番号にする
+
+5. 全て終わったらまとめて図にする:
+
+   ```bash
+   python scripts/merge_results.py runs/packet_loss_ucf101_*_2026* -o runs/packet_loss_ucf101_merged
+   python scripts/packet_loss_plot.py runs/packet_loss_ucf101_merged
+   ```
+
+- 設定ファイルは `CONFIG=configs/packet_loss_ucf101_quick.yaml` で変えられる（quick は target が 2 つなので `--array=0-1`）
+- 実行されるコマンドは `DRY_RUN=1 SLURM_ARRAY_TASK_ID=1 bash scripts/slurm/packet_loss.sbatch` で確認できる
+- 他の環境変数（`EXTRA` / `SCHEMES` / `VENV`）はスクリプトの先頭のコメントを参照
 
 使う動画（`selection: paper`、`src/splitcomp/data/ucf101.py` の `PAPER_CLIPS`）:
 - 論文には「UCF-101 の 5 カテゴリにまたがる 30 クリップ・各 30 連続フレーム」としか書かれておらず、
