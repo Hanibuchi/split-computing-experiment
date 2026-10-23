@@ -71,6 +71,7 @@ configs/            設定ファイルの例（各項目に日本語コメント
 docs/               ドキュメント
 examples/           Python API の使用例
 scripts/            実験用スクリプト（list_splits / sweep / train_bottleneck / serve / client / packet_loss_sweep / train_restorer / merge_results / packet_loss_plot）
+  slurm/              研究室の Slurm クラスタ用（packet_loss.sbatch: パケットロス実験の配列ジョブ / prefetch.py: 事前ダウンロード）
 src/splitcomp/      ライブラリ本体
   split/              モデル分割（Splitter）と分割推論（SplitPipeline）
   compression/        圧縮方式（Codec）と学習型ボトルネック
