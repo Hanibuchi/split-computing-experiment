@@ -330,6 +330,7 @@ def main() -> None:
     threads = limit_cpu_threads()
     print(f"CPU スレッド数: {threads}")
     head_dev, tail_dev = resolve_device(cfg.devices.head), resolve_device(cfg.devices.tail)
+    print(f"デバイス: head={head_dev}, tail={tail_dev}")
     done: set[str] = set()
     if args.resume:
         run_dir = args.resume
