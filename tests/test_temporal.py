@@ -38,8 +38,8 @@ def _video(T=30, shape=(8, 6, 6), rho=0.95, seed=0):
     return torch.stack(f)
 
 
-def _run(feats, scheme, bits=4, gop=30, p_quant="sym", lost_frames=(), concealment="hold"):
-    enc = TemporalEncoder(scheme, bits, gop, p_quant)
+def _run(feats, scheme, bits=4, gop=30, p_quant="sym", lost_frames=(), concealment="hold", streams=1):
+    enc = TemporalEncoder(scheme, bits, gop, p_quant, streams=streams)
     dec = TemporalDecoder(concealment)
     out = []
     for t, f in enumerate(feats):
@@ -132,6 +132,92 @@ def test_zero_concealment():
     frame = EncodedFrame(0, "I", torch.tensor([1, 2, 3], dtype=torch.int32), 0.5, (3,))
     out = dec.decode(frame, torch.tensor([True, False, True]))
     torch.testing.assert_close(out, torch.tensor([0.5, 0.0, 1.5]))
+
+
+# --- 多系列 DPCM（streams = n） ------------------------------------------------------
+
+
+@pytest.mark.parametrize("streams", [2, 5])
+def test_multi_stream_reference_structure(streams):
+    """I フレームは GoP 先頭だけで、参照フレームは max(t − n, GoP 先頭)（GoP をまたがない）。"""
+    gop = 12
+    enc = TemporalEncoder("dpcm", 4, gop, "dz", streams=streams)
+    frames = [enc.encode(f) for f in _video(T=2 * gop)]
+    for fr in frames:
+        pos = fr.t % gop
+        if pos == 0:
+            assert fr.kind == "I" and fr.ref is None
+        else:
+            assert fr.kind == "P"
+            assert fr.ref == (fr.t - pos if pos < streams else fr.t - streams)
+
+
+def test_single_stream_matches_previous_frame_reference():
+    """streams = 1 は、直前のフレームを参照する通常の DPCM と同じ。"""
+    feats = _video(T=20)
+    frames = [f for f in (TemporalEncoder("dpcm", 4, 10, "dz").encode(x) for x in feats)]
+    assert all(fr.ref == fr.t - 1 for fr in frames if fr.kind == "P")
+    # ref を持たない（古い形式の）フレームでも、直前を参照して同じ結果になる
+    dec_new, dec_old = TemporalDecoder(), TemporalDecoder()
+    for fr in frames:
+        old = EncodedFrame(fr.t, fr.kind, fr.idx, fr.q, fr.shape)
+        torch.testing.assert_close(dec_new.decode(fr), dec_old.decode(old), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("scheme", ["dpcm", "dwd"])
+@pytest.mark.parametrize("streams", [2, 5])
+def test_multi_stream_lossless_matches_encoder(scheme, streams):
+    """ロスがなければ、クラウドの復元は端末が想定する f̂ と一致する（DPCM はドリフトもしない）。"""
+    feats = _video(T=30)
+    enc = TemporalEncoder(scheme, 4, 15, "dz", streams=streams)
+    dec = TemporalDecoder()
+    for f in feats:
+        frame = enc.encode(f)
+        torch.testing.assert_close(dec.decode(frame), enc.prev_hat, rtol=0, atol=0)
+    if scheme == "dpcm":
+        err = (_run(feats, "dpcm", bits=2, gop=30, p_quant="dz", streams=streams) - feats).pow(2).flatten(1).mean(1)
+        assert err[20:].mean() < 2 * err[1:10].mean()
+
+
+@pytest.mark.parametrize("streams", [2, 5])
+def test_multi_stream_loss_stays_in_its_stream(streams):
+    """P フレームを 1 枚失うと、同じ GoP の同じ系列（t ≡ 失ったフレーム mod n）の、後ろのフレームだけがずれる。"""
+    feats = _video(T=24)
+    gop, lost = 12, 3
+    clean = _run(feats, "dpcm", bits=8, gop=gop, p_quant="dz", streams=streams)
+    lossy = _run(feats, "dpcm", bits=8, gop=gop, p_quant="dz", streams=streams, lost_frames={lost})
+    diff = (lossy - clean).abs().flatten(1).amax(1)
+    t = torch.arange(len(feats))
+    affected = (t >= lost) & (t < gop) & ((t - lost) % streams == 0)
+    assert torch.all(diff[affected] > 0)
+    assert torch.all(diff[~affected] == 0)
+    # hold: 失ったフレームは参照フレームの復元値になる
+    torch.testing.assert_close(lossy[lost], clean[max(lost - streams, 0)])
+
+
+def test_multi_stream_iframe_loss_affects_whole_gop():
+    """I フレームは全ての系列の起点なので、失うと GoP 全体がずれる。"""
+    feats = _video(T=20)
+    clean = _run(feats, "dpcm", bits=8, gop=10, p_quant="dz", streams=2)
+    lossy = _run(feats, "dpcm", bits=8, gop=10, p_quant="dz", streams=2, lost_frames={10})
+    diff = (lossy - clean).abs().flatten(1).amax(1)
+    assert torch.all(diff[:10] == 0) and torch.all(diff[10:] > 0)
+
+
+def test_multi_stream_widens_quantization_step():
+    """参照が時間的に遠くなるので差分が大きくなり、同じビット数では量子化ステップ q（＝量子化誤差）が大きくなる。"""
+    feats = _video(T=30, rho=0.95)
+
+    def mean_step(streams):
+        enc = TemporalEncoder("dpcm", 4, 30, "dz", streams=streams)
+        return np.mean([enc.encode(f).q for f in feats][5:])
+
+    assert mean_step(1) < mean_step(2) < mean_step(5)
+
+
+def test_streams_must_be_positive():
+    with pytest.raises(ValueError):
+        TemporalEncoder("dpcm", 4, streams=0)
 
 
 # --- パケット分割 -------------------------------------------------------------
@@ -511,7 +597,7 @@ def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cf
 
     T = feats.shape[0]
     loss = build_loss_model(loss_cfg, sweep._clip_seed(seed, clip))
-    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
+    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant, streams=scheme.streams)
     dec = TemporalDecoder(cfg.concealment)
     recon = torch.empty_like(feats)
     for t in range(T):
@@ -547,6 +633,7 @@ def test_encode_once_matches_reference(interleave):
         TemporalSchemeConfig("F+Sym", "fd", "sym"),
         TemporalSchemeConfig("DwD+Sym", "dwd", "sym"),
         TemporalSchemeConfig("D+DZ", "dpcm", "dz"),
+        TemporalSchemeConfig("D+DZ+S2", "dpcm", "dz", streams=2),
     ]
     losses = [
         LossConfig("bernoulli", 0.0),

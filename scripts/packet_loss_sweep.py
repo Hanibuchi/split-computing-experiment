@@ -8,7 +8,8 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 を行い、量子化もロスもない元モデルの出力との top-1 一致率（agreement）などを集計する。
 端末はロスを知らない（フィードバックなし）ので、DPCM のロスは次の I フレームまで伝搬する。
 方式に restorer（scripts/train_restorer.py で学習したロス補修 net）を指定すると、クラウド側で欠けた要素を補ってから
-tail に渡す（例: D+DZ+R）。
+tail に渡す（例: D+DZ+R）。方式に streams: n を指定すると、P フレームが n フレーム前を参照する多系列 DPCM になり、
+ロスの伝搬が n 本の系列のうち 1 本に閉じる（例: D+DZ+S2 / D+DZ+S5）。
 
 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
@@ -32,6 +33,9 @@ torch の CPU スレッド数は、ジョブに割り当てられたコア数（
 
     # 新手法を試す段階: 条件を減らしたお試し設定（2 モデル・Gilbert-Elliott のみ）。--scheme で方式も絞れる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+R
+
+    # 多系列 DPCM（2 系列・5 系列）を通常の D+DZ と比べる
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+S2 --scheme D+DZ+S5
 
     # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
@@ -114,7 +118,7 @@ def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
 
     端末はロスを知らないので、結果は損失モデル・シードによらない。
     """
-    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant)
+    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant, streams=scheme.streams)
     frames = [enc.encode(feats[t]) for t in range(feats.shape[0])]
     layouts = [entropy_layout(f.idx, bits, cfg.mtu, cfg.interleave) for f in frames]
     return EncodedClip(frames, entropy=[entropy_bits(f.idx) for f in frames], layouts=layouts)
@@ -356,9 +360,9 @@ def main() -> None:
     for name, r in restorers.items():
         print(f"{name}: ロス補修 net を使います（学習条件: {r.meta}）")
 
-    # 複数の方式で同じになる符号化（方式, P の量子化, ビット数）。クリップごとに 1 回だけ符号化して保持する
-    enc_count = Counter((s.scheme, s.p_quant) for s in cfg.schemes)
-    reused_encodings = {(sch, pq, b) for (sch, pq), n in enc_count.items() if n > 1 for b in cfg.bits}
+    # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。クリップごとに 1 回だけ符号化して保持する
+    enc_count = Counter((s.scheme, s.p_quant, s.streams) for s in cfg.schemes)
+    reused_encodings = {(*key, b) for key, n in enc_count.items() if n > 1 for b in cfg.bits}
 
     dataset = build_dataset(cfg.data)
     print(f"クリップ {len(dataset)} 本を評価します（GoP={cfg.gop}, MTU={cfg.mtu}, concealment={cfg.concealment}）")
@@ -404,7 +408,7 @@ def main() -> None:
                     for bits in cfg.bits:
                         # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す。
                         # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）の間でも使い回す
-                        enc_key = (scheme.scheme, scheme.p_quant, bits)
+                        enc_key = (scheme.scheme, scheme.p_quant, scheme.streams, bits)
                         encoded = shared.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
                         if enc_key in reused_encodings:
                             shared[enc_key] = encoded
@@ -437,6 +441,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
     for (scheme, bits, loss, _seed), acc in accs.items():
         by_cond[(scheme, bits, loss)].append(acc)
     loss_cfgs = {l.display_name(): l for l in cfg.losses}
+    streams = {s.name: s.streams for s in cfg.schemes}
 
     rows, curve = [], []
     for (scheme, bits, loss), group in by_cond.items():
@@ -451,6 +456,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "feature_shape": "x".join(map(str, shape)),
                 "scheme": scheme,
                 "bits": bits,
+                "streams": streams.get(scheme, 1),  # 多系列 DPCM の系列数（1 = 通常）
                 "coding": "adaptive_ac",  # パケットの符号化（packet_loss_plot.py が古い固定長の結果と見分ける用）
                 "gop": cfg.gop,
                 "loss": loss,

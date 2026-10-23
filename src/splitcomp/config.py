@@ -184,6 +184,9 @@ class TemporalSchemeConfig:
     #: ロス補修 net の学習済み重み（scripts/train_restorer.py の出力）。指定すると P フレームでロスが起きたときに
     #: 欠けた要素を補ってから tail に渡す（例: D+DZ+R）。None なら使わない。
     restorer: str | None = None
+    #: 系列数 n。P フレームが n フレーム前（GoP 内の位置 n 未満は GoP 先頭の I フレーム）を参照する。
+    #: フレームが n 本の独立な系列に分かれ、ロスの伝搬がその系列に閉じる（例: D+DZ+S2）。1 で通常の DPCM。fd では使わない。
+    streams: int = 1
 
 
 @dataclass

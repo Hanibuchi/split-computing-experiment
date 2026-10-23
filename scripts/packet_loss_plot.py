@@ -29,12 +29,14 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 # 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
-SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R"]
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
     "D+DZ": {"color": "#eda100", "marker": "D"},
     "D+DZ+R": {"color": "#c2185b", "marker": "s"},
+    "D+DZ+S2": {"color": "#7b4fd6", "marker": "v"},  # 多系列 DPCM（2 系列）
+    "D+DZ+S5": {"color": "#6d4c41", "marker": "P"},  # 多系列 DPCM（5 系列）
 }
 # 3 系列までの色（ビット数・損失モデル用）
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
