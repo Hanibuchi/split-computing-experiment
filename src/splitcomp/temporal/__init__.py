@@ -5,19 +5,24 @@ Split Computing on Video Streams," IEEE Access, vol. 14, 2026.
 
 - :mod:`.quantize` : P99 範囲の対称量子化 / dead-zone 量子化、エントロピー
 - :mod:`.coding`   : TemporalEncoder（端末）/ TemporalDecoder（クラウド）: FD / DwD / DPCM
-- :mod:`.packet`   : パケット分割と損失モデル（Bernoulli / Gilbert-Elliott / フレーム単位）
+- :mod:`.packet`   : パケット分割（固定長 / パケットごとの適応算術符号）と損失モデル（Bernoulli / Gilbert-Elliott / フレーム単位）
 - :mod:`.restore`  : ロスで欠けた特徴をクラウド側で補う、モデル共通のロス補修 net（D+DZ+R）
 """
 
 from .coding import EncodedFrame, TemporalDecoder, TemporalEncoder
 from .packet import (
+    AC_HEADER_BYTES,
+    AC_TAIL_BYTES,
     HEADER_BYTES,
     BernoulliLoss,
     FrameLoss,
     GilbertElliottLoss,
     LossModel,
+    PacketLayout,
+    adaptive_code_bits,
     build_loss_model,
     elements_per_packet,
+    entropy_layout,
     frame_bytes,
     num_packets,
     packet_assignment,
@@ -39,6 +44,11 @@ __all__ = [
     "build_loss_model",
     "register_loss_model",
     "HEADER_BYTES",
+    "AC_HEADER_BYTES",
+    "AC_TAIL_BYTES",
+    "PacketLayout",
+    "entropy_layout",
+    "adaptive_code_bits",
     "elements_per_packet",
     "num_packets",
     "packet_assignment",

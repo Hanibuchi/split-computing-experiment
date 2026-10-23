@@ -1,10 +1,22 @@
 """量子化インデックスのパケット分割と、パケットロスのモデル。
 
 パケット分割:
-    1 フレームの量子化インデックス（b ビット固定長）を、ペイロードが MTU に収まるように分ける。
+    1 フレームの量子化インデックスを、ペイロードが MTU に収まるように分ける。
     各パケットのヘッダ（:data:`HEADER_BYTES`）にはフレーム番号・種類・連番・オフセット・ステップ幅 q が入り、
     パケット単体で復号できる。そのため、ロスしたパケットの要素だけが欠ける。
-    （エントロピー符号化をパケット間で行うと 1 パケットのロスでフレーム全体が壊れるので、ここでは固定長とする。）
+    実験（scripts/packet_loss_sweep.py, scripts/train_restorer.py）では常にエントロピー符号化する:
+
+    エントロピー符号化（:func:`entropy_layout`。結果は :class:`PacketLayout`）:
+        パケットごとに独立した適応算術符号で符号化する。各パケットの先頭で頻度表を初期化し
+        （全 2^b 記号のカウントを α=1 から始める Laplace 推定）、符号化しながら更新するので、
+        付加情報なしでパケット単体で復号できる。フレーム全体をまとめて符号化すると 1 パケットのロスで
+        フレーム全体が壊れるので、パケットをまたいだ符号化はしない。
+        実際のビット列は作らず、符号長を正確に計算する（:func:`adaptive_code_bits`）。
+        適応 Laplace モデルの符号長は記号の順序によらず、パケット内の記号のカウントだけで決まる。
+        ヘッダには算術符号の復号に必要な要素数 u32 を加え（:data:`AC_HEADER_BYTES`）、
+        符号の終端分として :data:`AC_TAIL_BYTES` を足す。
+    固定長（:func:`packet_assignment` / :func:`num_packets` / :func:`frame_bytes`）:
+        各要素を b ビット固定長で詰める（比較用の参考。ヘッダは :data:`HEADER_BYTES`）。
 
     interleave=False : 要素を先頭から順に詰める（1 パケット ≒ 数チャネル分の連続した領域）
     interleave=True  : 要素 i をパケット i mod P に入れる（ロスが空間的に分散する）
@@ -30,6 +42,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -39,6 +52,12 @@ from ..config import LossConfig
 
 #: パケットヘッダのバイト数: フレーム番号 u32 + 種類 u8 + 連番 u16 + パケット数 u16 + オフセット u32 + q f32
 HEADER_BYTES = 4 + 1 + 2 + 2 + 4 + 4
+#: エントロピー符号化したパケットのヘッダのバイト数（:data:`HEADER_BYTES` + 要素数 u32）
+AC_HEADER_BYTES = HEADER_BYTES + 4
+#: 算術符号の終端（最後の区間を確定させる分）のバイト数
+AC_TAIL_BYTES = 2
+#: 適応モデルの頻度表の初期カウント（Laplace 推定）
+AC_ALPHA = 1.0
 
 
 def elements_per_packet(bits: int, mtu: int = 1400) -> int:
@@ -81,6 +100,106 @@ def frame_bytes(num_elements: int, bits: int, mtu: int = 1400) -> int:
 def received_mask(lost: np.ndarray, assignment: torch.Tensor) -> torch.Tensor:
     """パケットごとのロス（True = ロス）から、要素ごとの「届いた」マスクを作る。"""
     return ~torch.from_numpy(lost)[assignment]
+
+
+# ---------------------------------------------------------------------------
+# エントロピー符号化したパケットの割り当て
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PacketLayout:
+    """1 フレームのパケット分割の結果。"""
+
+    #: 各要素が入るパケットの番号（長さ num_elements の int64）
+    assign: torch.Tensor
+    #: パケット数
+    num_packets: int
+    #: 送信バイト数（ヘッダ込み）
+    bytes: int
+
+
+def adaptive_code_bits(counts: torch.Tensor, alpha: float = AC_ALPHA) -> torch.Tensor:
+    """適応 Laplace モデルの算術符号の符号長 [bit]（終端分を除く理想値）。
+
+    記号 s の確率を (それまでの s の出現数 + α) / (それまでの記号数 + αK) とすると、全体の符号長は順序によらず
+    ``log2 Γ(n+αK)/Γ(αK) − Σ_s log2 Γ(c_s+α)/Γ(α)`` になる。
+
+    Args:
+        counts: 記号ごとの出現数（最後の次元が K 記号）。(P, K) なら各パケットの符号長を返す。
+    """
+    c = counts.double()
+    K = c.shape[-1]
+    n = c.sum(-1)
+    nats = torch.lgamma(n + alpha * K) - math.lgamma(alpha * K) - (torch.lgamma(c + alpha) - math.lgamma(alpha)).sum(-1)
+    return nats / math.log(2)
+
+
+def _incremental_bits(sym: torch.Tensor, K: int, alpha: float) -> torch.Tensor:
+    """sym[0] からパケットを始めたときの、各要素の符号長 [bit]（適応 Laplace モデル）。
+
+    要素 i の符号長は −log2((sym[:i] 中の sym[i] の出現数 + α) / (i + αK))。出現数は記号で安定ソートしたときの
+    グループ内の順位なので、K によらない計算量で求まる。
+    """
+    W = sym.numel()
+    pos = torch.arange(W)
+    order = torch.argsort(sym, stable=True)
+    s = sym[order]
+    is_start = torch.ones(W, dtype=torch.bool)
+    is_start[1:] = s[1:] != s[:-1]
+    group_start = torch.cummax(torch.where(is_start, pos, 0), 0).values
+    rank = torch.empty(W, dtype=torch.int64)
+    rank[order] = pos - group_start
+    return -torch.log2((rank.double() + alpha) / (pos.double() + alpha * K))
+
+
+def _ac_packet_bytes(code_bits: torch.Tensor) -> torch.Tensor:
+    return AC_HEADER_BYTES + torch.ceil(code_bits / 8).long() + AC_TAIL_BYTES
+
+
+def entropy_layout(idx: torch.Tensor, bits: int, mtu: int = 1400, interleave: bool = False, alpha: float = AC_ALPHA) -> PacketLayout:
+    """パケットごとに独立した適応算術符号で符号化したときのパケット分割。
+
+    interleave=False: 先頭から順に、ペイロード（MTU − ヘッダ − 終端）に収まるだけ詰める。
+    interleave=True : 要素 i をパケット i mod P に入れ、全てのパケットが MTU に収まる最小に近い P を探す。
+
+    Args:
+        idx: 1 フレームの量子化インデックス（平らにした整数, 範囲 [-2^(b-1), 2^(b-1) - 1]）。
+    """
+    K = 1 << bits
+    payload_bits = (mtu - AC_HEADER_BYTES - AC_TAIL_BYTES) * 8
+    if payload_bits < bits:
+        raise ValueError(f"MTU {mtu} が小さすぎます（ヘッダ {AC_HEADER_BYTES} + 終端 {AC_TAIL_BYTES} バイト）")
+    sym = idx.flatten().long() + (K >> 1)
+    n = sym.numel()
+
+    if interleave:
+        total = float(adaptive_code_bits(torch.bincount(sym, minlength=K)[None], alpha)[0])
+        P = max(1, math.ceil(total / payload_bits))
+        while True:
+            assign = torch.arange(n) % P
+            counts = torch.bincount(assign * K + sym, minlength=P * K).view(P, K)
+            code = adaptive_code_bits(counts, alpha)
+            if bool((code <= payload_bits).all()):
+                return PacketLayout(assign, P, int(_ac_packet_bytes(code).sum()))
+            P = min(n, max(P + 1, math.ceil(P * 1.02)))
+
+    sizes, code_bits = [], []
+    s, W = 0, max(64, payload_bits // bits)
+    while s < n:
+        W = min(W, n - s)
+        while True:
+            cum = torch.cumsum(_incremental_bits(sym[s : s + W], K, alpha), 0)
+            m = int(torch.searchsorted(cum, float(payload_bits), right=True))  # 収まる要素数
+            if m < W or s + W == n:
+                break
+            W = min(2 * W, n - s)
+        sizes.append(m)
+        code_bits.append(float(cum[m - 1]))
+        s += m
+        W = m + m // 4 + 64  # 次のパケットも同じくらい入ると見込む
+    assign = torch.repeat_interleave(torch.arange(len(sizes)), torch.tensor(sizes))
+    return PacketLayout(assign, len(sizes), int(_ac_packet_bytes(torch.tensor(code_bits, dtype=torch.float64)).sum()))
 
 
 # ---------------------------------------------------------------------------
