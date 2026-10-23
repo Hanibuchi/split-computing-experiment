@@ -5,7 +5,7 @@
     agreement_drop_heatmap.png          ロスなしからの一致率の低下（モデル平均）
     dpcm_vs_fd.png                      D+DZ と F+Sym の一致率の差（0 を下回ると DPCM が負ける）
     gop_curve_<モデル>.png              GoP 内の位置ごとの一致率と特徴 MSE（ロスの伝搬）
-    rate_vs_agreement.png               エントロピー符号化した場合の送信量と一致率
+    rate_vs_agreement.png               送信量（パケットごとにエントロピー符号化した実際の送信量）と一致率
     loss_rate_check.png                 指定した損失率と実際のパケット損失率
     summary.md                          ロスなしの表、損失モデル別の表、DPCM が FD を下回る損失率
 
@@ -69,6 +69,9 @@ def load(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     df["num_elements"] = df["feature_shape"].map(lambda s: math.prod(int(v) for v in str(s).split("x")))
     # エントロピー符号化した場合の 1 フレームあたりの送信量（参考値）
     df["entropy_kb_per_frame"] = df["entropy_bpe"] * df["num_elements"] / 8 / 1024
+    # 図に使う送信量: パケットごとにエントロピー符号化した実際の送信量（ヘッダ込み）。
+    #   coding 列の無い古い結果（固定長で送っていた版）は、上のエントロピーからの理想値を使う
+    df["rate_kb_per_frame"] = df["bytes_per_frame"] / 1024 if "coding" in df else df["entropy_kb_per_frame"]
 
     gop_path = run_dir / "gop_curve.csv"
     gop = None
@@ -244,7 +247,7 @@ def plot_gop_curves(gop: pd.DataFrame, out_dir: Path, bits: int) -> None:
 
 
 def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernoulli(p=0.05)") -> None:
-    """エントロピー符号化した場合の送信量 → 一致率。ロスなしと lossy を並べる。点はビット数（2/4/8）。"""
+    """送信量（rate_kb_per_frame）→ 一致率。ロスなしと lossy を並べる。点はビット数（2/4/8）。"""
     models = models_of(df)
     conds = [c for c in ["no_loss", lossy] if c in set(df.loss)]
     fig, axes = plt.subplots(len(conds), len(models), figsize=(2.9 * len(models), 2.5 * len(conds)),
@@ -254,7 +257,7 @@ def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernou
             ax = axes[i, j]
             for s in SCHEMES:
                 g = df[(df.model == model) & (df.loss == cond) & (df.scheme == s)].sort_values("bits")
-                ax.plot(g.entropy_kb_per_frame, g.agreement, **SCHEME_STYLE[s])
+                ax.plot(g.rate_kb_per_frame, g.agreement, **SCHEME_STYLE[s])
             ax.set_xscale("log")
             ax.xaxis.set_major_locator(LogLocator(subs=(1, 2, 5)))
             ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
@@ -264,7 +267,7 @@ def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernou
             if j == 0:
                 ax.set_ylabel(f"{cond}\nagreement")
             if i == len(conds) - 1:
-                ax.set_xlabel("entropy-coded size [KB/frame]")
+                ax.set_xlabel("size [KB/frame]")
     fig.suptitle("Rate vs. agreement (points: 2 / 4 / 8 bit)", y=1.04)
     scheme_legend(fig)
     fig.tight_layout(rect=(0, 0, 1, 0.95))

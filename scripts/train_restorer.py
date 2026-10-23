@@ -41,8 +41,7 @@ from splitcomp.temporal import (
     TemporalDecoder,
     TemporalEncoder,
     build_loss_model,
-    num_packets,
-    packet_assignment,
+    entropy_layout,
     received_mask,
     save_restorer,
 )
@@ -67,9 +66,6 @@ def simulate(feats: torch.Tensor, cfg: RestorerTrainConfig, bits: int, loss_cfg,
             err: 全フレームの ||復号結果 − ロスなしの復元特徴||² の和。
             ref: 全フレームの ||ロスなしの復元特徴||² の和（err を相対誤差にする用）。
     """
-    n = feats[0].numel()
-    assign = packet_assignment(n, bits, cfg.mtu, cfg.interleave)
-    P = num_packets(n, bits, cfg.mtu)
     loss = build_loss_model(loss_cfg, seed)
     enc = TemporalEncoder("dpcm", bits, cfg.gop, "dz")
 
@@ -84,9 +80,10 @@ def simulate(feats: torch.Tensor, cfg: RestorerTrainConfig, bits: int, loss_cfg,
     for f in feats:
         frame = enc.encode(f)
         target = enc.prev_hat.clone()  # ロスがなかったときにクラウドが持つ f̂_t
-        lost = loss.drop(P)
+        layout = entropy_layout(frame.idx, bits, cfg.mtu, cfg.interleave)
+        lost = loss.drop(layout.num_packets)
         record.clear()
-        out = dec.decode(frame, received_mask(lost, assign) if lost.any() else None)
+        out = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
         if record:
             samples.append((*record[0], target))
         err += float((out - target).pow(2).sum())
