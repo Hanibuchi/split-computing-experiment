@@ -73,6 +73,7 @@ class TemporalEncoder:
         clip: 量子化の範囲 R の決め方 "p99" / "max"（I/P 共通）。
         theta: スパース化しきい値（|x| < theta·R を量子化前に 0 にする。I/P 共通）。
         streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
+        full_range: True なら量子化の値を [−R, R] に収める（インデックスは ±2^(b−1) で b ビットに収まらない。論文の再現用）。
     """
 
     def __init__(
@@ -84,6 +85,7 @@ class TemporalEncoder:
         clip: str = "p99",
         theta: float = 0.0,
         streams: int = 1,
+        full_range: bool = False,
     ):
         if scheme not in SCHEMES:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
@@ -96,6 +98,7 @@ class TemporalEncoder:
         self.clip = clip
         self.theta = theta
         self.streams = streams
+        self.full_range = full_range
         self.reset()
 
     def reset(self) -> None:
@@ -115,14 +118,14 @@ class TemporalEncoder:
     def encode(self, f: torch.Tensor) -> EncodedFrame:
         t = self.t
         if self.is_intra(t):
-            idx, q = quantize(f, self.bits, "sym", self.clip, self.theta)
+            idx, q = quantize(f, self.bits, "sym", self.clip, self.theta, self.full_range)
             recon = dequantize(idx, q)
             kind, ref = "I", None
         else:
             ref = self.ref_index(t)
             ref_true, ref_hat = self.history[ref - t]  # ref − t ∈ [−streams, −1]
             base = ref_true if self.scheme == "dwd" else ref_hat
-            idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta)
+            idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta, self.full_range)
             recon = ref_hat + dequantize(idx, q)
             kind = "P"
         self.prev_true = f

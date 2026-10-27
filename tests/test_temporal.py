@@ -60,6 +60,18 @@ def test_index_fits_in_bits(bits):
         assert idx.min() >= -(1 << (bits - 1)) and idx.max() <= (1 << (bits - 1)) - 1
 
 
+def test_full_range_is_symmetric():
+    # 論文どおり [−R, R] に収める: 2-bit（q = R/2）で +0.9R は +R、−0.9R は −R に戻る
+    R = 1.0
+    q = 2 * R / 4
+    x = torch.tensor([0.9, -0.9, 5.0, -5.0])
+    np.testing.assert_array_equal(symmetric_quantize(x, 2, q, full_range=True).numpy(), [2, -2, 2, -2])
+    # 既定（b ビットに収める）では +側は 1 で止まる
+    np.testing.assert_array_equal(symmetric_quantize(x, 2, q).numpy(), [1, -2, 1, -2])
+    idx, _ = quantize(torch.randn(10000) * 3, 4, "dz", full_range=True)
+    assert idx.max() == 8 and idx.min() == -8
+
+
 def test_deadzone_widens_zero_bin():
     q = 1.0
     x = torch.tensor([0.0, 0.5, 0.74, -0.74, 0.76, 1.74, 1.76, -0.76])

@@ -60,7 +60,7 @@ def test_dnd_has_no_accumulation_and_dpcm_matches_dnd_without_clipping():
 def test_fdz_is_deadzone_on_every_frame():
     f = _video()
     _, coded = vs.reconstruct(f, "fd", 4, "dz", "p99", 0.0, 30)
-    idx, _ = quantize(f[5], 4, "dz")
+    idx, _ = quantize(f[5], 4, "dz", full_range=True)
     assert torch.equal(coded[5][1], idx.flatten())
 
 
