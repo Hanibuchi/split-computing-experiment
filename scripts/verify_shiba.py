@@ -8,6 +8,7 @@ IEEE Access, vol. 14, 2026。論文の数値は splitcomp.temporal.paper_values 
     - 4 方式（FD / DwD / DnD / DPCM）× b ∈ {2,3,4,6,8} × θ ∈ {0, 0.05, 0.1, 0.2} × {対称, dead-zone} = 1,920 通り
       （dead-zone のとき、FD は全フレームを dead-zone（F+DZ）、差分の方式は I を対称・P を dead-zone（D+DZ）で量子化）
     - 量子化の範囲 R は P99。EfficientNetV2-S だけ Max も計算する（Table 11/12）
+    - 量子化は論文どおり値を [−R, R] に収める（インデックスは ±2^(b−1) の 2^b + 1 段。full_range=True）
     - 15fps（frame_step=2）の特徴の統計（Fig. 4）、GoP 長 K ∈ {5,10,15,30} の GoP 平均エントロピー（Fig. 11）
 
 FD / DwD / DPCM は splitcomp.temporal の TemporalEncoder / TemporalDecoder（ロスなし）をそのまま使う。
@@ -95,14 +96,18 @@ def entropy_and_zeros(idx: torch.Tensor, bits: int) -> tuple[float, int]:
     splitcomp.temporal.entropy_bits と同じ値を、bincount で速く求める。
     """
     half = 1 << (bits - 1)
-    counts = torch.bincount((idx.flatten() + half).long(), minlength=1 << bits).double()
+    counts = torch.bincount((idx.flatten() + half).long(), minlength=(1 << bits) + 1).double()
     p = counts[counts > 0] / counts.sum()
     return float(-(p * torch.log2(p)).sum()), int(counts[half])
 
 
 def zlib_bpe(idx: torch.Tensor, bits: int) -> float:
-    """量子化インデックスを 1 要素 1 バイトにして zlib（level 6）で圧縮したときの bit/要素（論文 §V-C-4）。"""
-    data = (idx.flatten() + (1 << (bits - 1))).to(torch.uint8).numpy().tobytes()
+    """量子化インデックスを 1 要素 1 バイトにして zlib（level 6）で圧縮したときの bit/要素（論文 §V-C-4）。
+
+    8-bit ではインデックス +128（+2^(b−1)）が 1 バイトに入らないので 256 で割った余りにする（−128 と重なる）。
+    P99 を超える端の値だけなので、サイズの見積もりにはほぼ影響しない。
+    """
+    data = ((idx.flatten() + (1 << (bits - 1))) % 256).to(torch.uint8).numpy().tobytes()
     return len(zlib.compress(data, 6)) * 8 / idx.numel()
 
 
@@ -112,7 +117,7 @@ def reconstruct(feats: torch.Tensor, scheme: str, bits: int, mode: str, clip: st
     recon = torch.empty_like(feats)
     coded = []
     if scheme in ("dwd", "dpcm") or (scheme == "fd" and mode == "sym"):
-        enc = TemporalEncoder(scheme, bits, gop, p_quant=mode, clip=clip, theta=theta)
+        enc = TemporalEncoder(scheme, bits, gop, p_quant=mode, clip=clip, theta=theta, full_range=True)
         dec = TemporalDecoder()
         for t in range(T):
             frame = enc.encode(feats[t])
@@ -120,17 +125,17 @@ def reconstruct(feats: torch.Tensor, scheme: str, bits: int, mode: str, clip: st
             coded.append((frame.kind, frame.idx))
     elif scheme == "fd":  # F+DZ: 全フレームを dead-zone で量子化（TemporalEncoder の I フレームは常に対称なのでここで作る）
         for t in range(T):
-            idx, q = quantize(feats[t], bits, mode, clip, theta)
+            idx, q = quantize(feats[t], bits, mode, clip, theta, full_range=True)
             recon[t] = dequantize(idx, q)
             coded.append(("I", idx.flatten()))
     elif scheme == "dnd":  # DnD: クラウドが真の f_{t−1} を持つ理想化（式 (5)）
         for t in range(T):
             if t % gop == 0:
-                idx, q = quantize(feats[t], bits, "sym", clip, theta)
+                idx, q = quantize(feats[t], bits, "sym", clip, theta, full_range=True)
                 recon[t] = dequantize(idx, q)
                 coded.append(("I", idx.flatten()))
             else:
-                idx, q = quantize(feats[t] - feats[t - 1], bits, mode, clip, theta)
+                idx, q = quantize(feats[t] - feats[t - 1], bits, mode, clip, theta, full_range=True)
                 recon[t] = feats[t - 1] + dequantize(idx, q)
                 coded.append(("P", idx.flatten()))
     else:
@@ -192,7 +197,7 @@ def run_target(target: tuple, args, head_dev, tail_dev, ds30, ds15) -> dict:
     conds = conditions(model_name, args.quick)
     T = pv.CLIP_LEN
     acc = {cond_key(c): dict(c, pos_agree=[0] * T, pos_mse=[0.0] * T, frames=0, mse=0.0, H_I=0.0, n_I=0, H_P=0.0, n_P=0,
-                             Z_I=0.0, Z_P=0.0, zeros_I=0, zeros_P=0, elems_I=0, elems_P=0, alpha=0.0, n_alpha=0) for c in conds}
+                             Z_I=0.0, Z_P=0.0, zeros_I=0, zeros_P=0, elems_I=0, elems_P=0, alpha_num=0.0, alpha_den=0.0) for c in conds}
     gop_acc = {K: {"H": 0.0, "n": 0} for K in GOP_LENGTHS}
     stats30, stats15 = [], []
     started = time.perf_counter()
@@ -238,13 +243,12 @@ def run_target(target: tuple, args, head_dev, tail_dev, ds30, ds15) -> dict:
                 if want_zlib:
                     a[f"Z_{kind}"] += zlib_bpe(idx, bits)
             if c["scheme"] == "dpcm" and c["theta"] == 0 and c["clip"] == "p99":
-                # 実測の α = Var(δ') / Var(δ) − 1（δ' = f_t − f̂_{t−1}, δ = f_t − f_{t−1}）。式 (26)
+                # 実測の α = ΣVar(δ') / ΣVar(δ) − 1（δ' = f_t − f̂_{t−1}, δ = f_t − f_{t−1}）。式 (26)
+                # σδ² は Table 7 と同じく全ペアの分散の平均なので、フレームごとの比ではなく分散の和の比にする
                 for t in range(1, T):
                     if t % pv.GOP:
-                        vd = float((feats[t] - feats[t - 1]).double().var(unbiased=False))
-                        vdp = float((feats[t] - recon[t - 1]).double().var(unbiased=False))
-                        a["alpha"] += vdp / vd - 1
-                        a["n_alpha"] += 1
+                        a["alpha_den"] += float((feats[t] - feats[t - 1]).double().var(unbiased=False))
+                        a["alpha_num"] += float((feats[t] - recon[t - 1]).double().var(unbiased=False))
 
         # Fig. 11: GoP 長 K を変えたときの D+DZ（DPCM）の GoP 平均エントロピー（8-bit。tail は使わない）
         for K in GOP_LENGTHS:
@@ -345,7 +349,8 @@ def load_raw(run_dir: Path):
                 zlib_P=c["Z_P"] / c["n_P"] if c["Z_P"] > 0 else np.nan,
                 sparsity=(c["zeros_I"] + c["zeros_P"]) / (c["elems_I"] + c["elems_P"]),
                 sparsity_P=c["zeros_P"] / c["elems_P"] if c["elems_P"] else np.nan,
-                alpha_meas=100 * c["alpha"] / c["n_alpha"] if c["n_alpha"] else np.nan,
+                # 古い raw（フレームごとの比の平均 alpha / n_alpha）は定義が違うので使わない
+                alpha_meas=100 * (c["alpha_num"] / c["alpha_den"] - 1) if c.get("alpha_den") else np.nan,
             )
             conds.append(row)
             if c["theta"] == 0 and c["clip"] == "p99":
@@ -904,7 +909,8 @@ SECTION_NOTE = {
     "Table 13": "クリップごとの ρ の平均の、30 クリップでの平均と標準偏差",
     "Fig. 4": "15fps（1 フレームおき）の ρ。論文の値は棒グラフからの読み取り",
     "Table 5": "本実装の Rf/Rδ から計算した MSE 比 (Rf/Rδ)² と Δb = log2(Rf/Rδ)",
-    "Table 6": "α [%]。「式27」は本実装の Rδ, σδ² を式 (27) に入れた値（論文の Table 6 と同じ求め方）、「実測」は Var(δ')/Var(δ) − 1",
+    "Table 6": "α [%]。「式27」は本実装の Rδ, σδ² を式 (27) に入れた値（論文の Table 6 と同じ求め方）、「実測」は ΣVar(δ')/ΣVar(δ) − 1。"
+                "実測には I フレームの P99 クリップの誤差も入る（論文の仮定 B2 が成り立たない分）ので、式 27 より大きくなりうる",
     "Table 8": "top-1 一致率（対称量子化, θ = 0, 900 フレーム）",
     "Table 9": "8-bit のエントロピー [bpe]。F+Sym は全フレーム、D+Sym / D+DZ は真の差分（DnD）の P フレームの平均",
     "Fig. 8": "2-bit の一致率。F+DZ は FD を dead-zone で、D+DZ は DnD の P を dead-zone で量子化。論文の値は棒グラフからの読み取り",
