@@ -4,7 +4,7 @@
 Split Computing on Video Streams," IEEE Access, vol. 14, 2026.
 
 - :mod:`.quantize` : P99 範囲の対称量子化 / dead-zone 量子化、エントロピー
-- :mod:`.coding`   : TemporalEncoder（端末）/ TemporalDecoder（クラウド）: FD / DwD / DPCM
+- :mod:`.coding`   : TemporalEncoder（端末）/ TemporalDecoder（クラウド）: FD / DwD / DPCM（多系列・NACK による参照フレーム選択 PRS）
 - :mod:`.packet`   : パケット分割（固定長 / パケットごとの適応算術符号）と損失モデル（Bernoulli / Gilbert-Elliott / フレーム単位）
 - :mod:`.restore`  : ロスで欠けた特徴をクラウド側で補う、モデル共通のロス補修 net（D+DZ+R）
 """

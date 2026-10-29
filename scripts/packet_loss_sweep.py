@@ -10,9 +10,13 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 方式に restorer（scripts/train_restorer.py で学習したロス補修 net）を指定すると、クラウド側で欠けた要素を補ってから
 tail に渡す（例: D+DZ+R）。方式に streams: n を指定すると、P フレームが n フレーム前を参照する多系列 DPCM になり、
 ロスの伝搬が n 本の系列のうち 1 本に閉じる（例: D+DZ+S2 / D+DZ+S5）。
+方式に prs: true を指定すると PRS（Reference Picture Selection）になる: クラウドはパケットが落ちたフレームの番号だけを
+NACK として返し（feedback_delay フレーム後に端末に届く）、端末はクラウド側で壊れていないフレームを参照して符号化する
+（例: D+DZ+PRS / D+DZ+PRS3）。フィードバックは壊れたフレームの番号だけなので、端末→クラウドの送信量は増えない。
 
 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
+ただし PRS は端末の符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う（:func:`prs_clip`）。
 torch の CPU スレッド数は、ジョブに割り当てられたコア数（os.sched_getaffinity）を超えないように調整する。
 
 出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
@@ -36,6 +40,9 @@ torch の CPU スレッド数は、ジョブに割り当てられたコア数（
 
     # 多系列 DPCM（2 系列・5 系列）を通常の D+DZ と比べる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+S2 --scheme D+DZ+S5
+
+    # PRS（フィードバック遅延 1 / 3 フレーム）を通常の D+DZ と比べる
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS --scheme D+DZ+PRS3
 
     # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
@@ -62,7 +69,7 @@ import torch
 
 from splitcomp.builder import build_split
 from splitcomp.cli import parse_cli
-from splitcomp.config import PacketLossConfig, load_config, to_dict
+from splitcomp.config import PacketLossConfig, TemporalSchemeConfig, load_config, to_dict
 from splitcomp.data import build_dataset
 from splitcomp.metrics import ResultWriter, make_run_dir, save_run_info
 from splitcomp.temporal import (
@@ -89,6 +96,10 @@ class _Accumulator:
         self.packets = 0
         self.bytes = 0
         self.entropy = 0.0
+        #: PRS: クラウドが返した NACK の数（フィードバックの量）
+        self.nacks = 0
+        #: PRS: 参照できる無事なフレームが無く I フレームにした回数
+        self.forced_intra = 0
         self.pos_agree = np.zeros(gop)
         self.pos_mse = np.zeros(gop)
         self.pos_count = np.zeros(gop)
@@ -131,7 +142,6 @@ def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss
     損失の乱数はクリップとシードで決まり、フレームごとに drop を 1 回呼ぶので、条件ごとに独立に再現できる。
     restorer（LossRestorer）を渡すと、P フレームでロスが起きたときに欠けた要素を補う。
     """
-    T = len(encoded.frames)
     loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
     dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
 
@@ -143,7 +153,55 @@ def decode_clip(encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss
         acc.entropy += encoded.entropy[t]  # 以前の版と同じ順に足す（浮動小数点の和を一致させるため）
         acc.packets += layout.num_packets
         acc.bytes += layout.bytes
+    _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc)
 
+
+@torch.no_grad()
+def prs_clip(
+    feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, encoded: EncodedClip | None = None
+) -> None:
+    """PRS で 1 クリップを符号化・ロス・復号し、tail を通して acc に加算する（端末とクラウドを 1 フレームずつ交互に動かす閉ループ）。
+
+    フレーム t のパケットが 1 つでも落ちると、クラウドは t の NACK を返し、端末はフレーム t + feedback_delay を符号化する前に受け取る。
+    フィードバック路ではロスは起きないとする。損失の乱数の使い方は :func:`decode_clip` と同じ（クリップとシードで決まり、
+    フレームごとに drop を 1 回呼ぶ）なので、パケット数が同じ間は同じロスのパターンになる。
+
+    encoded に同じ (方式, P の量子化, 系列数, ビット数) をフィードバックなしで符号化した結果（:func:`encode_clip`）を渡すと、
+    今の GoP でまだ NACK を受けていない（= フィードバックなしと同じ符号化になる）フレームでは、そのパケット分割とエントロピーを
+    使い回す（パケット分割が重いので。結果は使い回さない場合と完全に一致する）。
+    """
+    T = feats.shape[0]
+    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
+    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant, streams=scheme.streams, prs=True)
+    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
+    arriving: dict[int, list[int]] = defaultdict(list)  # 端末に届くフレーム番号 → その時に届く NACK（壊れたフレームの番号）
+
+    recon = torch.empty_like(feats)
+    for t in range(T):
+        for s in arriving.pop(t, []):
+            enc.nack(s)
+        frame = enc.encode(feats[t])
+        if encoded is not None and not enc.nacked:
+            # この GoP でまだ NACK を受けていないので、フィードバックなしの符号化と同じフレーム
+            frame, layout, entropy = encoded.frames[t], encoded.layouts[t], encoded.entropy[t]
+        else:
+            layout, entropy = entropy_layout(frame.idx, bits, cfg.mtu, cfg.interleave), entropy_bits(frame.idx)
+        lost = loss.drop(layout.num_packets)
+        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
+        if lost.any():
+            arriving[t + scheme.feedback_delay].append(t)
+            acc.nacks += 1
+        acc.lost_packets += int(lost.sum())
+        acc.entropy += entropy
+        acc.packets += layout.num_packets
+        acc.bytes += layout.bytes
+    acc.forced_intra += enc.forced_intra
+    _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc)
+
+
+def _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc: _Accumulator) -> None:
+    """復元した特徴 recon[T, ...] を tail に通し、元モデルとの一致率・特徴 MSE・GoP 位置ごとの値を acc に加算する。"""
+    T = recon.shape[0]
     pred = tail(recon.to(tail_dev)).argmax(-1).cpu()
     agree = (pred == ref_pred).double()
     mse = (recon - feats).pow(2).flatten(1).mean(1).double()
@@ -325,6 +383,8 @@ def main() -> None:
         cfg.targets = select_targets(cfg.targets, args.target)
         cfg.schemes = select_schemes(cfg.schemes, args.scheme)
     for s in cfg.schemes:
+        if s.prs and (s.scheme == "fd" or s.feedback_delay < 1):
+            raise SystemExit(f"方式 {s.name}: prs は fd 以外で、feedback_delay は 1 以上にしてください")
         if s.restorer and not Path(s.restorer).exists():
             raise SystemExit(
                 f"方式 {s.name} のロス補修 net {s.restorer} がありません。先に scripts/train_restorer.py で学習するか、"
@@ -361,6 +421,7 @@ def main() -> None:
         print(f"{name}: ロス補修 net を使います（学習条件: {r.meta}）")
 
     # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。クリップごとに 1 回だけ符号化して保持する
+    # （PRS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
     enc_count = Counter((s.scheme, s.p_quant, s.streams) for s in cfg.schemes)
     reused_encodings = {(*key, b) for key, n in enc_count.items() if n > 1 for b in cfg.bits}
 
@@ -407,14 +468,19 @@ def main() -> None:
                 for scheme in cfg.schemes:
                     for bits in cfg.bits:
                         # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す。
-                        # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）の間でも使い回す
+                        # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）や、PRS の NACK を受ける前のフレームでも使い回す
                         enc_key = (scheme.scheme, scheme.p_quant, scheme.streams, bits)
                         encoded = shared.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
                         if enc_key in reused_encodings:
                             shared[enc_key] = encoded
+                        restorer = restorers.get(scheme.name)
                         for loss_cfg, seed in conditions:
                             key = (scheme.name, bits, loss_cfg.display_name(), seed)
-                            decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key], restorers.get(scheme.name))
+                            if scheme.prs:
+                                # PRS は符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う
+                                prs_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, accs[key], restorer, encoded)
+                            else:
+                                decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key], restorer)
                         del encoded
                 del shared
                 shape = list(feats.shape[1:])
@@ -441,7 +507,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
     for (scheme, bits, loss, _seed), acc in accs.items():
         by_cond[(scheme, bits, loss)].append(acc)
     loss_cfgs = {l.display_name(): l for l in cfg.losses}
-    streams = {s.name: s.streams for s in cfg.schemes}
+    schemes = {s.name: s for s in cfg.schemes}
 
     rows, curve = [], []
     for (scheme, bits, loss), group in by_cond.items():
@@ -449,6 +515,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
         agreement = sum(a.agree for a in group) / frames
         per_seed = [a.agree / a.frames for a in group]
         lc = loss_cfgs[loss]
+        sc = schemes.get(scheme, TemporalSchemeConfig(name=scheme))
         rows.append(
             {
                 "model": target.model.name,
@@ -456,7 +523,9 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "feature_shape": "x".join(map(str, shape)),
                 "scheme": scheme,
                 "bits": bits,
-                "streams": streams.get(scheme, 1),  # 多系列 DPCM の系列数（1 = 通常）
+                "streams": sc.streams,  # 多系列 DPCM の系列数（1 = 通常）
+                "prs": sc.prs,  # NACK による参照フレーム選択（PRS）
+                "feedback_delay": sc.feedback_delay if sc.prs else None,  # NACK が届くまでのフレーム数
                 "coding": "adaptive_ac",  # パケットの符号化（packet_loss_plot.py が古い固定長の結果と見分ける用）
                 "gop": cfg.gop,
                 "loss": loss,
@@ -474,6 +543,9 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "packets_per_frame": sum(a.packets for a in group) / frames,
                 "bytes_per_frame": sum(a.bytes for a in group) / frames,
                 "entropy_bpe": sum(a.entropy for a in group) / frames,
+                # PRS のフィードバック: 1 フレームあたりの NACK 数（NACK 1 つ = 壊れたフレームの番号 u32）と強制 I フレーム数
+                "nacks_per_frame": sum(a.nacks for a in group) / frames,
+                "forced_intra_per_frame": sum(a.forced_intra for a in group) / frames,
             }
         )
         pos_count = sum(a.pos_count for a in group)

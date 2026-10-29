@@ -14,7 +14,7 @@
 #
 #   環境変数（sbatch は投げたシェルの環境変数をジョブに引き継ぐ）:
 #     CONFIG   設定ファイル（既定 configs/packet_loss_ucf101.yaml）
-#     SCHEMES  実行する方式の name（空白区切り。既定 "F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5"。空にすると設定の全方式）
+#     SCHEMES  実行する方式の name（空白区切り。既定 "F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3"。空にすると設定の全方式）
 #     EXTRA    packet_loss_sweep.py にそのまま渡す追加の引数（key=value の上書きなど。空白区切り）
 #     RESUME   途中で止まった実行フォルダ。指定すると --resume で続きから再開する（CONFIG / SCHEMES は無視される）
 #     VENV     有効にする仮想環境（既定 .venv）
@@ -39,7 +39,7 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 CONFIG="${CONFIG:-configs/packet_loss_ucf101.yaml}"
-SCHEMES="${SCHEMES-F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5}"   # :- ではなく - なので、SCHEMES= と空にすると全方式
+SCHEMES="${SCHEMES-F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3}"   # :- ではなく - なので、SCHEMES= と空にすると全方式
 EXTRA="${EXTRA:-}"
 RESUME="${RESUME:-}"
 VENV="${VENV:-.venv}"

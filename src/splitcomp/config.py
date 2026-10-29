@@ -187,6 +187,11 @@ class TemporalSchemeConfig:
     #: 系列数 n。P フレームが n フレーム前（GoP 内の位置 n 未満は GoP 先頭の I フレーム）を参照する。
     #: フレームが n 本の独立な系列に分かれ、ロスの伝搬がその系列に閉じる（例: D+DZ+S2）。1 で通常の DPCM。fd では使わない。
     streams: int = 1
+    #: PRS（Reference Picture Selection）。クラウドが壊れたフレームの番号だけを NACK で返し、端末はクラウド側で壊れていない
+    #: フレームを参照して符号化する（例: D+DZ+PRS）。fd では使わない。
+    prs: bool = False
+    #: PRS の NACK が端末に届くまでのフレーム数 d（フレーム t の NACK は t + d を符号化する前に届く。1 以上）。
+    feedback_delay: int = 1
 
 
 @dataclass
