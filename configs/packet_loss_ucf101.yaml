@@ -41,6 +41,9 @@ devices:
 #           学習していない場合は、この行を消すかコメントアウトする
 #   D+DZ+S2 / D+DZ+S5: 多系列 DPCM。P フレームが n フレーム前（GoP 内の位置 n 未満は GoP 先頭の I フレーム）を参照し、
 #           フレームが n 本の独立な系列に分かれる。ロスの伝搬がその系列だけに閉じる代わりに、差分が大きくなり量子化誤差が増える
+#   D+DZ+PRS / D+DZ+PRS3: PRS（Reference Picture Selection）。クラウドはパケットが落ちたフレームの番号だけを NACK で返し、
+#           端末は feedback_delay フレーム後にそれを受け取って、以降はクラウド側で壊れていないフレームを参照して符号化する。
+#           フィードバックは壊れたフレームの番号だけなので、端末→クラウドの送信量は増えない（30fps で d=1 は RTT 33ms 以内、d=3 は 100ms 以内）
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
   - {name: D+Sym, scheme: dpcm, p_quant: sym}
@@ -48,6 +51,8 @@ schemes:
   - {name: D+DZ+R, scheme: dpcm, p_quant: dz, restorer: checkpoints/restorer_resnet50_layer2.pt}
   - {name: D+DZ+S2, scheme: dpcm, p_quant: dz, streams: 2}   # 2 系列（t は t−2 を参照）
   - {name: D+DZ+S5, scheme: dpcm, p_quant: dz, streams: 5}   # 5 系列（t は t−5 を参照）
+  - {name: D+DZ+PRS, scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 1}    # NACK が次のフレームまでに届く
+  - {name: D+DZ+PRS3, scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 3}   # NACK が 3 フレーム後に届く
 
 bits: [2, 4, 8]
 gop: 30

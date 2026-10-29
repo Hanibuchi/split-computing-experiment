@@ -232,6 +232,90 @@ def test_streams_must_be_positive():
         TemporalEncoder("dpcm", 4, streams=0)
 
 
+# --- PRS（NACK による参照フレーム選択） ------------------------------------------------
+
+
+def _run_prs(feats, lost_frames=(), delay=1, gop=30, streams=1, bits=8, prs=True):
+    """PRS で符号化・復号する。lost_frames のフレームは全要素を落とし、delay フレーム後に NACK が端末に届く。
+
+    戻り値: (クラウドの復元, 送ったフレームのリスト, 端末が想定した f̂ のリスト, 符号化器)
+    """
+    enc = TemporalEncoder("dpcm", bits, gop, "dz", streams=streams, prs=prs)
+    dec = TemporalDecoder()
+    out, frames, hats = [], [], []
+    for t, f in enumerate(feats):
+        for s in lost_frames:
+            if s + delay == t:
+                enc.nack(s)
+        frame = enc.encode(f)
+        mask = torch.zeros(f.numel(), dtype=torch.bool) if t in lost_frames else None
+        out.append(dec.decode(frame, mask))
+        frames.append(frame)
+        hats.append(enc.prev_hat)
+    return torch.stack(out), frames, hats, enc
+
+
+def test_prs_without_loss_matches_dpcm():
+    """NACK が来なければ、PRS は通常の DPCM と全く同じ符号化になる。"""
+    feats = _video(T=24)
+    for streams in (1, 2):
+        _, prs, _, _ = _run_prs(feats, gop=12, streams=streams)
+        _, ref, _, _ = _run_prs(feats, gop=12, streams=streams, prs=False)
+        for a, b in zip(prs, ref):
+            assert (a.kind, a.ref, a.q) == (b.kind, b.ref, b.q)
+            assert torch.equal(a.idx, b.idx)
+
+
+@pytest.mark.parametrize("delay", [1, 3])
+def test_prs_stops_propagation_after_feedback(delay):
+    """P フレーム lost を失うと、NACK が届くまでの delay フレームだけずれ、その後は壊れていないフレームを参照して元に戻る。"""
+    feats = _video(T=20)
+    lost = 5
+    out, frames, hats, enc = _run_prs(feats, lost_frames={lost}, delay=delay)
+    diff = torch.stack([(o - h).abs().amax() for o, h in zip(out, hats)])
+    assert torch.all(diff[:lost] == 0)
+    assert torch.all(diff[lost : lost + delay] > 0)  # NACK が届くまでは伝搬する
+    assert torch.all(diff[lost + delay :] == 0)  # 届いた後は端末とクラウドの f̂ が一致する
+    # NACK の後の最初のフレームは、壊れたフレームより前の最新のフレームを参照する
+    assert frames[lost + delay].ref == lost - 1
+    assert enc.is_broken(lost) and enc.is_broken(lost + delay - 1) and not enc.is_broken(lost + delay)
+    assert enc.forced_intra == 0
+
+
+def test_prs_iframe_loss_forces_intra():
+    """GoP 先頭の I フレームを失うと参照できる無事なフレームが無いので、NACK が届いたフレームを I フレームにする。"""
+    feats = _video(T=10)
+    out, frames, hats, enc = _run_prs(feats, lost_frames={0}, delay=2)
+    assert frames[2].kind == "I" and frames[2].ref is None
+    assert frames[3].ref == 2
+    assert enc.forced_intra == 1
+    diff = torch.stack([(o - h).abs().amax() for o, h in zip(out, hats)])
+    assert torch.all(diff[:2] > 0) and torch.all(diff[2:] == 0)
+
+
+def test_prs_multi_stream_falls_back_to_newer_frame():
+    """多系列で、通常の参照以前に無事なフレームが無いときは、より新しい無事なフレームを参照する（I フレームにはしない）。"""
+    feats = _video(T=12)
+    # streams=2: 1 → 0(I)。0 が壊れると 0 以前に無事なフレームが無いので、強制 I フレーム 2 の後は 2 を参照する
+    _, frames, _, enc = _run_prs(feats, lost_frames={0}, delay=2, streams=2)
+    assert frames[2].kind == "I"
+    assert frames[3].ref == 2  # 通常なら 1（壊れている）だが、より新しい 2 を参照する
+    assert frames[4].ref == 2
+    assert enc.forced_intra == 1
+
+
+def test_prs_ignores_nack_of_previous_gop():
+    feats = _video(T=12)
+    out, frames, hats, _ = _run_prs(feats, lost_frames={5}, delay=2, gop=6)
+    assert [f.kind for f in frames[6:]] == list("IPPPPP")
+    assert all(f.ref == f.t - 1 for f in frames[7:])
+
+
+def test_prs_requires_p_frames():
+    with pytest.raises(ValueError):
+        TemporalEncoder("fd", 4, prs=True)
+
+
 # --- パケット分割 -------------------------------------------------------------
 
 
@@ -674,6 +758,49 @@ def test_encode_once_matches_reference(interleave):
                                 assert np.array_equal(got, v), k
                             else:
                                 assert got == v, k
+
+
+def test_prs_clip_matches_dpcm_without_loss_and_helps_with_loss():
+    """sweep の prs_clip: ロスなしなら D+DZ と集計値が一致し、ロスありでは D+DZ より特徴 MSE が小さく、NACK を数える。"""
+    import numpy as np
+
+    from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    dz = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    prs = TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, feedback_delay=1)
+    cfg = PacketLossConfig(schemes=[dz, prs], bits=[4], gop=15, mtu=60)
+    torch.manual_seed(0)
+    tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
+    feats = _video(T=15, shape=(8, 7, 7))
+    ref_pred = tail(feats).argmax(-1)
+
+    def run(scheme, loss_cfg, reuse=False):
+        acc = sweep._Accumulator(cfg.gop)
+        encoded = sweep.encode_clip(feats, cfg, scheme, 4)
+        if scheme.prs:
+            sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc, encoded=encoded if reuse else None)
+        else:
+            sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, 0, 0, acc)
+        return acc
+
+    no_loss = LossConfig("bernoulli", 0.0)
+    a, b = run(dz, no_loss), run(prs, no_loss)
+    for k, v in vars(a).items():
+        got = vars(b)[k]
+        assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == pytest.approx(v), k
+    assert b.nacks == 0
+
+    lossy = LossConfig("bernoulli", 0.1)
+    a, b = run(dz, lossy), run(prs, lossy)
+    assert b.nacks > 0 and a.nacks == 0
+    assert b.mse < a.mse
+    # NACK を受ける前のフレームでフィードバックなしの符号化を使い回しても、結果は完全に一致する
+    for loss_cfg in (no_loss, lossy, LossConfig("gilbert_elliott", 0.2, burst_len=3)):
+        c, d = run(prs, loss_cfg), run(prs, loss_cfg, reuse=True)
+        for k, v in vars(c).items():
+            got = vars(d)[k]
+            assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 
 # --- ロス補修 net（D+DZ+R） --------------------------------------------------------

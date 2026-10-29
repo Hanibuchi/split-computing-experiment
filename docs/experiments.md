@@ -202,7 +202,7 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3
 （D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
@@ -404,6 +404,46 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - ロス耐性: `agreement_drop` が D+DZ よりどれだけ小さいか。F+Sym（ロスが伝搬しない）にどこまで近づくか
 - `gop_curve.csv` で GoP 内の位置ごとの劣化の様子（D+DZ のような後半ほどの悪化が緩やかになるか）
 - バースト（Gilbert-Elliott）では連続するフレームが別の系列に入るので、1 系列あたりのロスが分散される効果がどれだけあるか
+
+### PRS: 壊れたフレームの番号だけを返す参照フレーム選択（D+DZ+PRS / D+DZ+PRS3）
+
+動画符号化の Reference Picture Selection（NACK モード）を応用したもの。D+DZ は端末がロスを知らないので、ロスが次の I フレームまで伝搬します。
+PRS では、クラウドが **パケットが 1 つでも落ちたフレームの番号だけ** を NACK として端末に返します（届いたフレームには何も返さない）。
+端末は NACK を受け取ったら、それ以降のフレームを **クラウド側で壊れていないフレーム** を参照して符号化するので、
+伝搬は NACK が届くまでの数フレームで止まります。返すのは壊れたフレームの番号（数バイト）だけなので、端末→クラウドの送信量は増えません。
+
+例（d = 2, フレーム 3 が壊れた場合。矢印は「参照される ← 参照する」）:
+
+```
+0(I) ← 1 ← 2 ← 3(ロス) ← 4          3 の NACK は 5 を符号化する前に届く（3, 4 はずれたまま）
+               2 ← 5 ← 6 ← ...      5 は壊れていない最新の 2 を参照する → 5 以降は元に戻る
+```
+
+- フィードバック遅延 `feedback_delay: d` [フレーム]: フレーム t の NACK はフレーム t + d を符号化する前に端末に届く
+  （30fps なら d = 1 は RTT 33ms 以内、d = 3 は 100ms 以内）。フィードバック路ではロスは起きないとする（NACK は小さいので冗長に送れる前提）
+- 端末は「NACK されたフレーム、または参照先が壊れたフレーム」を壊れたとみなす（参照関係は端末が知っているので伝搬も端末で計算できる）。
+  NACK がまだ来ていないフレームは無事とみなす（ACK を返さないので楽観的）
+- 参照の選び方: 通常の参照（max(t − n, GoP 先頭)）以前で無事な最新のフレーム → 無ければ t より前で無事な最新のフレーム →
+  それも無ければ（GoP 先頭の I フレームが壊れたとき）そのフレームを I フレームにする（送信量は実際の I フレーム分で数える）
+- 参照先 t − ref はパケットヘッダの「種類」u8 の残り 7 ビットに入れる想定なので、ヘッダは増えない
+- ロスがなければ D+DZ と全く同じ符号化・結果になる。多系列（`streams`）や restorer（`restorer`）とも組み合わせられる
+- 設定は方式の `prs: true` と `feedback_delay: d`（`configs/packet_loss_ucf101.yaml` に D+DZ+PRS（d=1）/ D+DZ+PRS3（d=3）がある）。
+  Python からは `TemporalEncoder(..., prs=True)` を作り、NACK を `enc.nack(t)` で渡す（復号器は各フレームの `ref` を見るので変更不要）
+- 端末の符号化がロスに依存するので、PRS だけは損失条件ごとに符号化と復号を交互に行う（`prs_clip`）。
+  今の GoP で NACK を受ける前のフレームはフィードバックなしと同じ符号化なので、そのパケット分割を使い回す（結果は完全に一致する）。
+  それでもロスの多い条件では D+DZ より時間がかかる
+- 結果の列: `prs`, `feedback_delay`, `nacks_per_frame`（1 フレームあたりの NACK 数 = フィードバックの量。1 つ = フレーム番号 u32）,
+  `forced_intra_per_frame`（参照できる無事なフレームが無く I フレームにした回数）
+
+```bash
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS --scheme D+DZ+PRS3
+```
+
+確認ポイント:
+- `no_loss` で D+DZ と `agreement` / `bytes_per_frame` が一致すること（ロスがなければ代償なし）
+- ロス耐性: `agreement_drop` が D+DZ よりどれだけ小さいか、d = 1 と d = 3 の差（フィードバックが遅いほど伝搬が長い）
+- 送信量: 参照が古くなると差分が大きくなるので、ロスありでは `bytes_per_frame` が D+DZ より少し増えうる。強制 I フレームの分も含まれる
+- `gop_curve.csv` で、ロス後の劣化が d フレームで回復しているか
 
 ---
 

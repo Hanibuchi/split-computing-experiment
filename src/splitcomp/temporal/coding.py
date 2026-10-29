@@ -17,6 +17,19 @@ P フレームで送るものは方式によって違う:
 
     例（n = 2, GoP = 6）:  0(I) ← 1, 0 ← 2 ← 4,  1 ← 3 ← 5
 
+PRS（Reference Picture Selection, prs=True）:
+    クラウドは、パケットが 1 つでも落ちたフレームの番号だけを NACK として端末に返す（届いたフレームについては何も返さないので、
+    フィードバックはロスが起きたときの数バイトだけで、端末→クラウドの送信量は増えない）。端末は NACK を :meth:`TemporalEncoder.nack` で受け取り、
+    「NACK されたフレーム、または参照先が壊れたフレーム」を壊れたとみなす（参照関係は端末が知っているので伝搬は端末で計算できる）。
+    NACK がまだ来ていないフレームは無事とみなす。P フレームの参照は
+
+        1. 通常の参照 max(t − n, GoP 先頭) 以前で、無事な最新のフレーム
+        2. それが無ければ、t より前で無事な最新のフレーム（多系列で、系列の先頭側がすべて壊れたとき）
+        3. それも無ければ（GoP 先頭の I フレームが壊れたとき）、そのフレームを I フレームにする
+
+    とする。ロスがなければ prs=False と全く同じ符号化になる。参照先はパケットヘッダの「種類」u8 の残り 7 ビットに
+    t − ref として入れる（GoP ≤ 128 なら足りる）ので、ヘッダは増えない。
+
 パケットロスの扱い:
     端末（:class:`TemporalEncoder`）はロスを知らない（フィードバックなし）。そのため DPCM でロスが起きると
     端末とクラウドの f̂ がずれ、そのずれは次の I フレームまで残る。
@@ -32,7 +45,6 @@ P フレームで送るものは方式によって違う:
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
@@ -74,6 +86,7 @@ class TemporalEncoder:
         theta: スパース化しきい値（|x| < theta·R を量子化前に 0 にする。I/P 共通）。
         streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
         full_range: True なら量子化の値を [−R, R] に収める（インデックスは ±2^(b−1) で b ビットに収まらない。論文の再現用）。
+        prs: True ならクラウドからの NACK（:meth:`nack`）を受けて、クラウド側で壊れていないフレームを参照する（PRS）。fd では使えない。
     """
 
     def __init__(
@@ -86,11 +99,14 @@ class TemporalEncoder:
         theta: float = 0.0,
         streams: int = 1,
         full_range: bool = False,
+        prs: bool = False,
     ):
         if scheme not in SCHEMES:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
         if streams < 1:
             raise ValueError(f"streams は 1 以上にしてください（{streams}）")
+        if prs and scheme == "fd":
+            raise ValueError("fd は P フレームが無いので prs は使えません")
         self.scheme = scheme
         self.bits = bits
         self.gop = gop
@@ -99,14 +115,38 @@ class TemporalEncoder:
         self.theta = theta
         self.streams = streams
         self.full_range = full_range
+        self.prs = prs
         self.reset()
 
     def reset(self) -> None:
         self.t = 0
         self.prev_true: torch.Tensor | None = None  # f_{t−1}
         self.prev_hat: torch.Tensor | None = None  # 端末が想定するクラウドの f̂_{t−1}
-        # 直近 streams フレーム分の (f, f̂)。末尾が t−1（参照フレームを取り出す用）
-        self.history: deque[tuple[torch.Tensor, torch.Tensor]] = deque(maxlen=self.streams)
+        # 現在の GoP のフレーム番号 → (f, f̂)（参照フレームを取り出す用）。prs=False なら直近 streams フレームだけ残す
+        self.history: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        # 現在の GoP のフレーム番号 → 参照フレーム番号（I フレームは None）
+        self.refs: dict[int, int | None] = {}
+        # 現在の GoP で NACK を受けたフレーム番号
+        self.nacked: set[int] = set()
+        #: 参照できる無事なフレームが無く、P フレームの代わりに I フレームにした回数（prs=True のとき）
+        self.forced_intra = 0
+
+    def nack(self, t: int) -> None:
+        """クラウドから「フレーム t が壊れた」という NACK を受け取る（prs=True のときに使う）。
+
+        すでに終わった GoP のフレームの NACK は、今後の参照に関係しないので無視する。
+        """
+        if t in self.refs:
+            self.nacked.add(t)
+
+    def is_broken(self, t: int) -> bool:
+        """フレーム t がクラウド側で壊れていると端末が知っているか（NACK 済み、または参照をたどると NACK 済みのフレームがある）。"""
+        s: int | None = t
+        while s is not None:
+            if s in self.nacked:
+                return True
+            s = self.refs[s]
+        return False
 
     def is_intra(self, t: int) -> bool:
         return self.scheme == "fd" or t % self.gop == 0
@@ -115,22 +155,48 @@ class TemporalEncoder:
         """P フレーム t の参照フレーム番号 max(t − streams, GoP 先頭)。"""
         return max(t - self.streams, t - t % self.gop)
 
+    def select_ref(self, t: int) -> int | None:
+        """P フレーム t が実際に参照するフレーム番号。None なら I フレームにする。
+
+        prs=False なら :meth:`ref_index` そのもの。prs=True なら壊れていないフレームを選ぶ（モジュールの説明を参照）。
+        """
+        ref = self.ref_index(t)
+        if not self.prs:
+            return ref
+        for candidates in (range(ref, -1, -1), range(t - 1, ref, -1)):
+            for s in candidates:
+                if s in self.history and not self.is_broken(s):
+                    return s
+        return None
+
     def encode(self, f: torch.Tensor) -> EncodedFrame:
         t = self.t
         if self.is_intra(t):
+            # GoP の先頭: これより前のフレームはもう参照しない
+            self.history.clear()
+            self.refs.clear()
+            self.nacked.clear()
+            ref = None
+        else:
+            ref = self.select_ref(t)
+            if ref is None:
+                self.forced_intra += 1
+        if ref is None:
             idx, q = quantize(f, self.bits, "sym", self.clip, self.theta, self.full_range)
             recon = dequantize(idx, q)
-            kind, ref = "I", None
+            kind = "I"
         else:
-            ref = self.ref_index(t)
-            ref_true, ref_hat = self.history[ref - t]  # ref − t ∈ [−streams, −1]
+            ref_true, ref_hat = self.history[ref]
             base = ref_true if self.scheme == "dwd" else ref_hat
             idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta, self.full_range)
             recon = ref_hat + dequantize(idx, q)
             kind = "P"
         self.prev_true = f
         self.prev_hat = recon
-        self.history.append((f, recon))
+        self.history[t] = (f, recon)
+        self.refs[t] = ref
+        if not self.prs:
+            self.history.pop(t - self.streams, None)  # 次のフレームの参照は t − streams + 1 以降
         self.t += 1
         return EncodedFrame(t, kind, idx.flatten(), q, tuple(f.shape), ref)
 
@@ -185,8 +251,9 @@ class TemporalDecoder:
                 fill = prev if self.concealment == "hold" else torch.zeros_like(value)
                 new = torch.where(received, new, fill)
         self.prev_hat = new.view(frame.shape)
-        # 後のフレームの参照は ref 以降（I フレームなら自分以降）なので、それより古いフレームは捨てる
-        oldest = frame.t if frame.ref is None else frame.ref
-        self.history = {t: h for t, h in self.history.items() if t >= oldest}
+        # I フレームより前のフレームは後で参照されないので捨てる（PRS では今の ref より古いフレームを後で参照することがあるので、
+        # P フレームでは捨てない）
+        if frame.kind == "I":
+            self.history.clear()
         self.history[frame.t] = self.prev_hat
         return self.prev_hat
