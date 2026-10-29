@@ -228,3 +228,6 @@ checkpoints/
 # フォルダ自体は .gitkeep で残し、中身だけ除外する
 /papers/*
 !/papers/.gitkeep
+
+# macOS が Finder の表示設定（アイコン位置など）を保存するファイル
+.DS_Store
