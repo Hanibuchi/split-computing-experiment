@@ -6,11 +6,11 @@
 #   （q も小さくなり、インデックスの分布の形が変わらないため）。q を I フレームの q に固定すると、差分が小さいほど
 #   インデックスが 0 付近に集まって送信量が減る。ここでは次のことを調べる:
 #     - D+DZ+QI の送信量と一致率を F+Sym / D+DZ と比べる（rate_vs_agreement.png）
+#     - D+DZ+Cmax（R = max|x|, クリップしない）と比べて、q 固定の効果が P99 クリップをやめたことから来ていないか
 #     - P フレームの飽和率（clamp_rate.png）と、パケットロスでの一致率の落ち方
 #
-#   条件が増えると実行時間がそのまま延びるので、方式は 3 つ・ビット数は 2/4/8 に絞っている。
+#   条件が増えると実行時間がそのまま延びるので、方式は 4 つ・ビット数は 2/4/8 に絞っている。
 #   ほかの比較をしたいときは、方式を足す（例）:
-#     - {name: D+DZ+Cmax, scheme: dpcm, p_quant: dz, clip: max}                          # R = max|x|（クリップしない）
 #     - {name: D+DZ+QI2, scheme: dpcm, p_quant: dz, p_step: intra, p_step_scale: 2.0}    # q = I フレームの q × 2
 #     - {name: D+DZ+QI+PRS, scheme: dpcm, p_quant: dz, p_step: intra, prs: true, feedback_delay: 1}  # q 固定 + PRS
 #
@@ -31,4 +31,5 @@ bits: [2, 4, 8]
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
   - {name: D+DZ, scheme: dpcm, p_quant: dz}
+  - {name: D+DZ+Cmax, scheme: dpcm, p_quant: dz, clip: max}     # R = max|x|（クリップしない）
   - {name: D+DZ+QI, scheme: dpcm, p_quant: dz, p_step: intra}  # P フレームの q = I フレームの q

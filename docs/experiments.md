@@ -524,7 +524,7 @@ D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 
 - 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
 
 ```bash
-# 2 モデル（efficientnet_v2_s / resnet50）× 3 ビット数（2/4/8）× 3 方式（F+Sym / D+DZ / D+DZ+QI）。ロスあり
+# 2 モデル（efficientnet_v2_s / resnet50）× 3 ビット数（2/4/8）× 4 方式（F+Sym / D+DZ / D+DZ+Cmax / D+DZ+QI）。ロスあり
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```
@@ -532,7 +532,7 @@ python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
 `SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
-今は 3 方式 × 3 ビット数 = 9 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
+今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm
