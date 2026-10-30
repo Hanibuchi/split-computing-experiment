@@ -32,6 +32,7 @@ src/splitcomp/
 ├── data/ucf101.py       UCF101Clips（動画クリップ）
 ├── temporal/            動画の時系列符号化（FD / DwD / DPCM, dead-zone 量子化）とパケットロス
 │   ├── coding.py        TemporalEncoder / TemporalDecoder（多系列 DPCM、NACK による参照フレーム選択 PRS を含む）
+│   ├── packet.py        パケット分割（パケットごとの適応算術符号）、FEC（パケット単位の消失訂正）、損失モデル
 │   └── restore.py       LossRestorer（ロスで欠けた特徴をクラウド側で補う、モデル共通のロス補修 net）
 ├── split/
 │   ├── splitter.py      Splitter（分割点の列挙と分割）, split_sequential（簡易版）

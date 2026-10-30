@@ -202,7 +202,7 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3 / D+DZ+FEC10 / D+DZ+FEC25
 （D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
@@ -446,6 +446,50 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - ロス耐性: `agreement_drop` が D+DZ よりどれだけ小さいか、d = 1 と d = 3 の差（フィードバックが遅いほど伝搬が長い）
 - 送信量: 参照が古くなると差分が大きくなるので、ロスありでは `bytes_per_frame` が D+DZ より少し増えうる。強制 I フレームの分も含まれる
 - `gop_curve.csv` で、ロス後の劣化が d フレームで回復しているか
+
+### FEC: パケット単位の消失訂正（D+DZ+FEC10 / D+DZ+FEC25）
+
+フィードバックを使わない古典的なロス対策です。端末は各フレームのデータ k パケットの後に、パリティ m = ceil(r·k) パケットを続けて送ります。
+符号は Reed-Solomon 相当の MDS 消失訂正符号を想定しています。UDP ではビット誤りのあるパケットはチェックサムで捨てられ、
+どのパケットが落ちたかは連番で分かるので、ここでのロスは「消失」として扱えます。
+
+- クラウドは、k+m 個のうち **落ちた数が m 以下ならフレーム全体を完全に復元** します（どのパケットが落ちても同じ）
+- m を超えたら復元できず、届いたデータパケットだけを使います（systematic 符号なので、データパケットはそのまま読める）。
+  欠けた要素は FEC なしと同じく concealment（と restorer）で補います
+- 実際の RS 符号化はせず、復元できるかどうかと送信量だけを正確に計算します
+- パリティパケットの長さは、そのフレームで一番長いデータパケット（`PacketLayout.max_bytes`）と同じとします。
+  ヘッダの要素数 u32 を k, m の u16×2 に置き換えるので、ヘッダの長さも変わりません
+- 符号はフレーム内で閉じているので、遅延は増えません。そのかわり次の弱点があります
+  - **frame**（フレーム単位の全損失）: パリティも一緒に消えるので、まったく効きません
+  - **Gilbert-Elliott**（バースト）: 1 フレームの中で連続して落ちると、パリティが足りなくなりやすいです
+  - パケット数が少ないフレーム（疎な P フレームや 2 ビット）では m が 1 になり、比率 r より冗長になります（切り上げのため）
+- 設定は方式の `fec: r`（`configs/packet_loss_ucf101.yaml` に D+DZ+FEC10（r=0.1）/ D+DZ+FEC25（r=0.25）がある）。
+  符号化は D+DZ と同じなので、パケット分割は D+DZ のものを使い回します。PRS（`prs: true`）や restorer とも組み合わせられます。
+  PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返します
+- Python からは `fec_parity(k, r)` でパリティ数、`fec_recover(lost, k)` で復元後のデータパケットのロスを求めます（`splitcomp.temporal`）
+- 結果の列:
+  - `fec_rate`: パリティの比率 r（0 = FEC なし）
+  - `parity_packets_per_frame`: 1 フレームあたりのパリティのパケット数（`packets_per_frame` と `bytes_per_frame` はパリティを含む）
+  - `loss_rate`: パリティを含む、通信路での損失率
+  - `residual_loss_rate`: FEC で復元した後の、データパケットの損失率（FEC なしでは `loss_rate` と一致する）
+
+```bash
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+FEC10 --scheme D+DZ+FEC25
+```
+
+実測例（ResNet50 / layer2, 4 ビット, Gilbert-Elliott L=4, 2 クリップ・シード 1 つの動作確認なので値は粗い）:
+
+| 方式 | 送信量 [B/フレーム] | p=0.05: residual_loss_rate | p=0.05: agreement_drop | p=0.1: residual_loss_rate | p=0.1: agreement_drop |
+|---|---|---|---|---|---|
+| D+DZ | 87,743 | 0.048 | 0.30 | 0.094 | 0.58 |
+| D+DZ+FEC10 | 97,193（+10.8%） | 0.030 | 0.00 | 0.072 | 0.48 |
+| D+DZ+FEC25 | 110,400（+25.8%） | 0.000 | 0.00 | 0.029 | 0.32 |
+
+確認ポイント:
+- `no_loss` で D+DZ と `agreement` / `feature_mse` が一致し、`bytes_per_frame` だけが約 r 以上増えること（ロスがなくても常にかかる代償）
+- `residual_loss_rate` が `loss_rate` よりどれだけ小さいか。損失率がパリティの比率を超えると急に効かなくなる（崖のような振る舞い）
+- 同じ送信量の増え方で、PRS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
+- frame 損失では D+DZ と同じ agreement になる（効かない）こと
 
 ---
 

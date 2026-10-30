@@ -29,7 +29,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 # 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
-SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3"]
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
@@ -39,6 +39,8 @@ SCHEME_STYLE = {
     "D+DZ+S5": {"color": "#6d4c41", "marker": "P"},  # 多系列 DPCM（5 系列）
     "D+DZ+PRS": {"color": "#00897b", "marker": "X"},  # PRS（NACK が 1 フレーム後に届く）
     "D+DZ+PRS3": {"color": "#5c6bc0", "marker": "*"},  # PRS（NACK が 3 フレーム後に届く）
+    "D+DZ+FEC10": {"color": "#e53935", "marker": "h"},  # FEC（パリティ 10%）
+    "D+DZ+FEC25": {"color": "#546e7a", "marker": "p"},  # FEC（パリティ 25%）
 }
 # 3 系列までの色（ビット数・損失モデル用）
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]

@@ -19,6 +19,8 @@ from splitcomp.temporal import (
     build_loss_model,
     deadzone_quantize,
     entropy_layout,
+    fec_parity,
+    fec_recover,
     frame_bytes,
     num_packets,
     packet_assignment,
@@ -362,6 +364,7 @@ def test_entropy_layout_fits_mtu_and_covers_all(bits, interleave):
     sizes = AC_HEADER_BYTES + torch.ceil(adaptive_code_bits(counts) / 8).long() + AC_TAIL_BYTES
     assert int(sizes.max()) <= mtu
     assert int(sizes.sum()) == layout.bytes
+    assert int(sizes.max()) == layout.max_bytes  # FEC のパリティパケットの長さ
     if not interleave:
         assert bool((layout.assign[1:] >= layout.assign[:-1]).all())  # 先頭から順に詰まっている
 
@@ -375,6 +378,30 @@ def test_entropy_layout_shrinks_sparse_frames(interleave):
     ac = entropy_layout(idx, bits, 1400, interleave)
     assert ac.num_packets < num_packets(n, bits) / 5
     assert ac.bytes < frame_bytes(n, bits) / 5
+
+
+def test_fec_parity_count():
+    assert fec_parity(20, 0.1) == 2
+    assert fec_parity(20, 0.25) == 5
+    assert fec_parity(3, 0.1) == 1  # 切り上げなので少なくとも 1 個
+    assert fec_parity(20, 0.0) == 0
+    assert fec_parity(0, 0.5) == 0
+
+
+def test_fec_recover_up_to_parity_count():
+    """k+m 個のうち落ちた数が m 以下なら全て復元し、超えたらデータパケットのロスがそのまま残る。"""
+    k, m = 6, 2
+    lost = np.zeros(k + m, dtype=bool)
+    lost[[1, 7]] = True  # データ 1 個 + パリティ 1 個
+    assert not fec_recover(lost, k).any()
+    lost[[1, 4]] = True  # データ 2 個（パリティが 2 個あるので復元できる）
+    lost[7] = False
+    assert not fec_recover(lost, k).any()
+    lost[6] = True  # 3 個落ちたので復元できない
+    np.testing.assert_array_equal(fec_recover(lost, k), lost[:k])
+    # パリティなしなら素通し
+    lost = np.array([False, True, False])
+    np.testing.assert_array_equal(fec_recover(lost, 3), lost)
 
 
 def test_received_mask_drops_packet_elements():
@@ -705,6 +732,8 @@ def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cf
         acc.packets += layout.num_packets
         acc.bytes += layout.bytes
         acc.entropy += entropy_bits(frame.idx)
+        acc.data_packets += layout.num_packets  # FEC なしでは、データパケットのロスがそのまま残る
+        acc.residual_lost += int(lost.sum())
     pred = tail(recon).argmax(-1)
     agree = (pred == ref_pred).double()
     mse = (recon - feats).pow(2).flatten(1).mean(1).double()
@@ -800,6 +829,55 @@ def test_prs_clip_matches_dpcm_without_loss_and_helps_with_loss():
         c, d = run(prs, loss_cfg), run(prs, loss_cfg, reuse=True)
         for k, v in vars(c).items():
             got = vars(d)[k]
+            assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
+
+
+def test_fec_clip_costs_bytes_and_recovers_loss():
+    """sweep の FEC: ロスなしなら D+DZ と精度が同じで送信量だけ増え、ロスありでは残るロスと特徴 MSE が減る。PRS とも組み合わせられる。"""
+    import numpy as np
+
+    from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    dz = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    fec = TemporalSchemeConfig("D+DZ+FEC25", "dpcm", "dz", fec=0.25)
+    prs = TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True)
+    prs_fec = TemporalSchemeConfig("D+DZ+PRS+FEC", "dpcm", "dz", prs=True, fec=0.25)
+    cfg = PacketLossConfig(schemes=[dz, fec], bits=[4], gop=15, mtu=60)
+    torch.manual_seed(0)
+    tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
+    feats = _video(T=15, shape=(8, 7, 7))
+    ref_pred = tail(feats).argmax(-1)
+    encoded = sweep.encode_clip(feats, cfg, dz, 4)
+
+    def run(scheme, loss_cfg):
+        acc = sweep._Accumulator(cfg.gop)
+        if scheme.prs:
+            sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc)
+        else:
+            sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, 0, 0, acc, fec=scheme.fec)
+        return acc
+
+    no_loss = LossConfig("bernoulli", 0.0)
+    a, b = run(dz, no_loss), run(fec, no_loss)
+    assert a.agree == b.agree and a.mse == b.mse
+    assert a.parity_packets == 0 and b.parity_packets > 0
+    assert b.packets == a.packets + b.parity_packets
+    assert b.bytes > a.bytes * 1.25 * 0.9  # パリティは一番長いデータパケットと同じ長さ
+    assert np.array_equal(a.pos_mse, b.pos_mse)
+
+    lossy = LossConfig("bernoulli", 0.1)
+    a, b = run(dz, lossy), run(fec, lossy)
+    assert a.residual_lost == a.lost_packets  # FEC なしでは通信路のロスがそのまま残る
+    assert b.residual_lost / b.data_packets < a.residual_lost / a.data_packets
+    assert b.mse < a.mse
+
+    # PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返す
+    c, d = run(prs, lossy), run(prs_fec, lossy)
+    assert 0 < c.nacks and d.nacks < c.nacks
+    for k, v in vars(run(prs, no_loss)).items():
+        if k not in ("bytes", "packets", "parity_packets"):
+            got = vars(run(prs_fec, no_loss))[k]
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 

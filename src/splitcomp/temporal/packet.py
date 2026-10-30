@@ -21,6 +21,14 @@
     interleave=False : 要素を先頭から順に詰める（1 パケット ≒ 数チャネル分の連続した領域）
     interleave=True  : 要素 i をパケット i mod P に入れる（ロスが空間的に分散する）
 
+FEC（:func:`fec_parity` / :func:`fec_recover`）:
+    パケット単位の MDS 消失訂正符号（Reed-Solomon 相当）。フレームごとに、データ k パケットの後に
+    パリティ m = ceil(r·k) パケットを続けて送る。どのパケットが落ちたかは連番で分かるので、k+m 個のうち
+    落ちた数が m 以下ならフレーム全体を完全に復元できる。m を超えたら復元できず、届いたデータパケットだけを使う
+    （systematic 符号なので、データパケットはそのまま読める）。実際の符号化はせず、復元できるかどうかと送信量だけを計算する。
+    パリティパケットの長さは一番長いデータパケット（:attr:`PacketLayout.max_bytes`）と同じとする
+    （ヘッダの要素数 u32 を k, m の u16×2 に置き換えるので、ヘッダの長さも変わらない）。
+
 損失モデル（:func:`build_loss_model` で設定から作る）:
     bernoulli       : 各パケットを独立に確率 p で落とす
     gilbert_elliott : Good / Bad の 2 状態マルコフ連鎖（Bad 中は全て落ちる）。平均損失率 p・平均バースト長 burst_len
@@ -117,6 +125,8 @@ class PacketLayout:
     num_packets: int
     #: 送信バイト数（ヘッダ込み）
     bytes: int
+    #: 一番大きいパケットのバイト数（ヘッダ込み。FEC のパリティパケットの長さ）
+    max_bytes: int = 0
 
 
 def adaptive_code_bits(counts: torch.Tensor, alpha: float = AC_ALPHA) -> torch.Tensor:
@@ -181,7 +191,8 @@ def entropy_layout(idx: torch.Tensor, bits: int, mtu: int = 1400, interleave: bo
             counts = torch.bincount(assign * K + sym, minlength=P * K).view(P, K)
             code = adaptive_code_bits(counts, alpha)
             if bool((code <= payload_bits).all()):
-                return PacketLayout(assign, P, int(_ac_packet_bytes(code).sum()))
+                sizes = _ac_packet_bytes(code)
+                return PacketLayout(assign, P, int(sizes.sum()), int(sizes.max()))
             P = min(n, max(P + 1, math.ceil(P * 1.02)))
 
     sizes, code_bits = [], []
@@ -199,7 +210,30 @@ def entropy_layout(idx: torch.Tensor, bits: int, mtu: int = 1400, interleave: bo
         s += m
         W = m + m // 4 + 64  # 次のパケットも同じくらい入ると見込む
     assign = torch.repeat_interleave(torch.arange(len(sizes)), torch.tensor(sizes))
-    return PacketLayout(assign, len(sizes), int(_ac_packet_bytes(torch.tensor(code_bits, dtype=torch.float64)).sum()))
+    packet_bytes = _ac_packet_bytes(torch.tensor(code_bits, dtype=torch.float64))
+    return PacketLayout(assign, len(sizes), int(packet_bytes.sum()), int(packet_bytes.max()))
+
+
+# ---------------------------------------------------------------------------
+# FEC（パケット単位の消失訂正）
+# ---------------------------------------------------------------------------
+
+
+def fec_parity(num_data: int, rate: float) -> int:
+    """データ num_data パケットに付けるパリティのパケット数 m = ceil(rate·num_data)（rate ≤ 0 なら 0）。"""
+    return math.ceil(rate * num_data) if rate > 0 and num_data > 0 else 0
+
+
+def fec_recover(lost: np.ndarray, num_data: int) -> np.ndarray:
+    """FEC で復元した後のデータパケットのロス（長さ num_data の bool。True = ロス）。
+
+    Args:
+        lost: データ num_data パケット → パリティ m パケットの順に送ったときのロス（長さ num_data + m）。
+              落ちた数が m 以下なら全て復元できる（MDS 符号）。超えたらデータパケットのロスがそのまま残る。
+    """
+    if int(lost.sum()) <= len(lost) - num_data:
+        return np.zeros(num_data, dtype=bool)
+    return lost[:num_data]
 
 
 # ---------------------------------------------------------------------------

@@ -192,6 +192,9 @@ class TemporalSchemeConfig:
     prs: bool = False
     #: PRS の NACK が端末に届くまでのフレーム数 d（フレーム t の NACK は t + d を符号化する前に届く。1 以上）。
     feedback_delay: int = 1
+    #: FEC（パケット単位の消失訂正, Reed-Solomon 相当）のパリティの比率 r。各フレームのデータ k パケットに
+    #: パリティ m = ceil(r·k) パケットを付け、落ちた数が m 以下ならフレーム全体を復元する（例: D+DZ+FEC10）。0 で FEC なし。
+    fec: float = 0.0
 
 
 @dataclass

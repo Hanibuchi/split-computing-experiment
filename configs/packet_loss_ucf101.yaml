@@ -44,6 +44,9 @@ devices:
 #   D+DZ+PRS / D+DZ+PRS3: PRS（Reference Picture Selection）。クラウドはパケットが落ちたフレームの番号だけを NACK で返し、
 #           端末は feedback_delay フレーム後にそれを受け取って、以降はクラウド側で壊れていないフレームを参照して符号化する。
 #           フィードバックは壊れたフレームの番号だけなので、端末→クラウドの送信量は増えない（30fps で d=1 は RTT 33ms 以内、d=3 は 100ms 以内）
+#   D+DZ+FEC10 / D+DZ+FEC25: FEC（パケット単位の消失訂正, Reed-Solomon 相当）。各フレームのデータ k パケットにパリティ
+#           m = ceil(fec·k) パケットを付け、落ちた数が m 以下ならクラウドでフレーム全体を復元する。パリティの分だけ送信量が増える。
+#           フレーム内で閉じた符号なので、フレーム単位の損失（frame）ではパリティも一緒に消えて効かない
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
   - {name: D+Sym, scheme: dpcm, p_quant: sym}
@@ -53,6 +56,8 @@ schemes:
   - {name: D+DZ+S5, scheme: dpcm, p_quant: dz, streams: 5}   # 5 系列（t は t−5 を参照）
   - {name: D+DZ+PRS, scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 1}    # NACK が次のフレームまでに届く
   - {name: D+DZ+PRS3, scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 3}   # NACK が 3 フレーム後に届く
+  - {name: D+DZ+FEC10, scheme: dpcm, p_quant: dz, fec: 0.1}    # パリティ 10%（k=20 なら m=2）
+  - {name: D+DZ+FEC25, scheme: dpcm, p_quant: dz, fec: 0.25}   # パリティ 25%（k=20 なら m=5）
 
 bits: [2, 4, 8]
 gop: 30
