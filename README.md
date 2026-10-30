@@ -64,6 +64,7 @@ Python から直接使う最小例は [`examples/quickstart.py`](examples/quicks
 | [docs/architecture.md](docs/architecture.md) | 全体の構成と処理の流れ、各モジュール・クラスの役割 |
 | [docs/extending.md](docs/extending.md) | 独自モデル・データセット・圧縮方式・評価指標・損失の追加方法 |
 | [docs/experiments.md](docs/experiments.md) | 典型的な実験の進め方と結果の見方（レシピ 6: Shiba et al. の再現検証） |
+| [docs/d_dz_prs.md](docs/d_dz_prs.md) | パケットロス対策 D+DZ+PRS（差分符号化 + dead-zone 量子化 + NACK による参照フレーム選択）の詳しい解説 |
 
 ## ディレクトリ構成
 
