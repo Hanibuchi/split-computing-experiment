@@ -7,6 +7,7 @@
     gop_curve_<モデル>.png              GoP 内の位置ごとの一致率と特徴 MSE（ロスの伝搬）
     rate_vs_agreement.png               送信量（パケットごとにエントロピー符号化した実際の送信量）と一致率
     loss_rate_check.png                 指定した損失率と実際のパケット損失率
+    clamp_rate.png                      ロスなしで、P フレームのインデックスが範囲の端に飽和した割合（列 clamp_rate がある結果のみ）
     summary.md                          ロスなしの表、損失モデル別の表、DPCM が FD を下回る損失率
 
 例:
@@ -29,7 +30,8 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 # 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
-SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25"]
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25",
+           "D+DZ+Cmax", "D+DZ+QI", "D+DZ+QI0.5", "D+DZ+QI2", "D+DZ+QI+PRS"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
@@ -41,9 +43,14 @@ SCHEME_STYLE = {
     "D+DZ+PRS3": {"color": "#5c6bc0", "marker": "*"},  # PRS（NACK が 3 フレーム後に届く）
     "D+DZ+FEC10": {"color": "#e53935", "marker": "h"},  # FEC（パリティ 10%）
     "D+DZ+FEC25": {"color": "#546e7a", "marker": "p"},  # FEC（パリティ 25%）
+    "D+DZ+Cmax": {"color": "#008300", "marker": "d"},  # 範囲 R = max|x|（クリップしない）
+    "D+DZ+QI": {"color": "#e34948", "marker": "o", "linestyle": "--"},  # P フレームの q を I フレームの q に固定
+    "D+DZ+QI0.5": {"color": "#e87ba4", "marker": "v", "linestyle": "--"},  # 同（q × 0.5）
+    "D+DZ+QI2": {"color": "#6250d6", "marker": "^", "linestyle": "--"},  # 同（q × 2）
+    "D+DZ+QI+PRS": {"color": "#eb6834", "marker": "X", "linestyle": "--"},  # q 固定 + PRS
 }
-# 3 系列までの色（ビット数・損失モデル用）
-SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
+# ビット数・損失モデル用の色（固定の順に使う）
+SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]
 LOSS_MODELS = ["bernoulli", "gilbert_elliott", "frame"]
 LOSS_MODEL_LABEL = {"bernoulli": "Bernoulli", "gilbert_elliott": "Gilbert-Elliott (L=4)", "frame": "Frame loss"}
 # GoP 曲線で並べる代表的な損失条件
@@ -210,7 +217,7 @@ def plot_dpcm_vs_fd(diff: pd.DataFrame, models: list[str], out_dir: Path) -> Non
             ax.axhline(0, color="#52514e", linewidth=0.8)
             for k, b in enumerate(bits_list):
                 g = diff[(diff.loss_model == m) & (diff.model == model) & (diff.bits == b)].sort_values("loss_p")
-                ax.plot(g.loss_p, g["diff"], marker="o", color=SERIES_COLORS[k % 3], label=f"{b} bit")
+                ax.plot(g.loss_p, g["diff"], marker="o", color=SERIES_COLORS[k % len(SERIES_COLORS)], label=f"{b} bit")
             if i == 0:
                 ax.set_title(model)
             if j == 0:
@@ -280,6 +287,31 @@ def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernou
     save(fig, out_dir / "rate_vs_agreement.png")
 
 
+def plot_clamp_rate(df: pd.DataFrame, out_dir: Path) -> None:
+    """ロスなしで、ビット数 → P フレームの飽和率（インデックスが ±2^(b−1) の端になった要素の割合）。列=モデル。"""
+    if "clamp_rate" not in df:
+        return
+    clean = df[df.loss_p == 0]
+    models = models_of(clean)
+    fig, axes = plt.subplots(1, len(models), figsize=(2.9 * len(models), 2.5), sharey=True, squeeze=False)
+    for j, model in enumerate(models):
+        ax = axes[0, j]
+        for s in SCHEMES:
+            g = clean[(clean.model == model) & (clean.scheme == s)].sort_values("bits")
+            if g.empty or s == "F+Sym":  # F+Sym には P フレームが無い
+                continue
+            ax.plot(g.bits, g.clamp_rate * 100, **SCHEME_STYLE[s])
+        ax.set_title(model)
+        ax.set_xlabel("bits")
+        ax.set_xticks(sorted(clean.bits.unique()))
+        if j == 0:
+            ax.set_ylabel("saturated P-frame indices [%]")
+    fig.suptitle("Saturation of P-frame indices (no loss)", y=1.04)
+    scheme_legend(fig)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    save(fig, out_dir / "clamp_rate.png")
+
+
 def plot_loss_rate_check(df: pd.DataFrame, out_dir: Path) -> None:
     """指定した loss_p と、実際に観測したパケット損失率 loss_rate。"""
     lossy = df[df.loss_p > 0]
@@ -327,6 +359,13 @@ def write_summary(df: pd.DataFrame, diff: pd.DataFrame, run_dir: Path, path: Pat
     parts += ["## ロスなしのエントロピー [bit/要素]", "",
               md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="entropy_bpe")
                        .reindex(columns=SCHEMES)), ""]
+    parts += ["## ロスなしの送信量 [KB/frame]（パケットごとにエントロピー符号化、ヘッダ込み）", "",
+              md_table((clean.pivot_table(index=["model", "bits"], columns="scheme", values="bytes_per_frame") / 1024)
+                       .reindex(columns=SCHEMES), digits=1), ""]
+    if "clamp_rate" in clean:
+        parts += ["## ロスなしの P フレームの飽和率（インデックスが ±2^(b−1) の端になった要素の割合）", "",
+                  md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="clamp_rate")
+                           .reindex(columns=[s for s in SCHEMES if s != "F+Sym"]), digits=4), ""]
     parts += ["## D+DZ が F+Sym を下回り始める損失率", "",
               "空欄は、評価した範囲では下回らなかったことを表す。", ""]
     if not diff.empty:
@@ -363,6 +402,7 @@ def main() -> None:
         plot_gop_curves(gop, out_dir, args.bits)
     plot_rate_vs_agreement(df, out_dir)
     plot_loss_rate_check(df, out_dir)
+    plot_clamp_rate(df, out_dir)
     write_summary(df, diff, args.run_dir, out_dir / "summary.md")
 
 

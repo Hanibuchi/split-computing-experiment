@@ -195,6 +195,14 @@ class TemporalSchemeConfig:
     #: FEC（パケット単位の消失訂正, Reed-Solomon 相当）のパリティの比率 r。各フレームのデータ k パケットに
     #: パリティ m = ceil(r·k) パケットを付け、落ちた数が m 以下ならフレーム全体を復元する（例: D+DZ+FEC10）。0 で FEC なし。
     fec: float = 0.0
+    #: 量子化の範囲 R の決め方 "p99"（|x| の P99。範囲外はクリップ）/ "max"（|x| の最大値。クリップしない）。I/P 共通。
+    #: p_step="intra" の P フレームでは使わない（q を I フレームから決めるため）。
+    clip: str = "p99"
+    #: P フレームのステップ幅 q の決め方。"adaptive": 毎フレーム差分の範囲から決め直す（論文どおり）/
+    #: "intra": 直近の I フレームの q × p_step_scale に固定する（差分が小さいほど送信量が減る。例: D+DZ+QI）。
+    p_step: str = "adaptive"
+    #: p_step="intra" のときの倍率（大きいほど P フレームが粗くなり、送信量が減る）。
+    p_step_scale: float = 1.0
 
 
 @dataclass

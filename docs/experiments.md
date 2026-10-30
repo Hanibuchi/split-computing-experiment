@@ -491,6 +491,44 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - 同じ送信量の増え方で、PRS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
 - frame 損失では D+DZ と同じ agreement になる（効かない）こと
 
+### P フレームのステップ幅 q の固定（D+DZ+QI / D+DZ+QI0.5 / D+DZ+QI2 / D+DZ+QI+PRS / D+DZ+Cmax）
+
+D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 2R/2^b を決め直します（論文どおり）。
+差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形はあまり変わらず、**エントロピー符号化後の送信量は F+Sym とほぼ同じ**になります。
+差分にした効果は、送信量の削減ではなく、量子化誤差が小さくなる（一致率が上がる）形で表れます。
+
+方式の `p_step: intra` を指定すると、P フレームの q を直近の I フレームの q × `p_step_scale` に固定します。
+差分が小さいほどインデックスが 0 付近に集まり、送信量が減ります。差分が ±2^(b−1)·q を超えた要素は飽和（クリップ）します。
+
+- q は毎フレームのパケットヘッダで送っているので、復号器は変わりません
+- PRS で P フレームの代わりに I フレームにしたときは、そのフレームの q に切り替えます
+- `clip: max` は範囲 R を max|x| にします（クリップしない）。q 固定の効果が「P99 クリップをやめたこと」から来ていないかを確かめる比較用です
+- Python からは `TemporalEncoder(..., p_step="intra", p_step_scale=1.0)`、量子化だけなら `quantize(x, bits, mode, step=q)`
+- 結果の列（全ての方式で出る）:
+  - `clip` / `p_step` / `p_step_scale`: 方式の設定
+  - `clamp_rate`: P フレームのインデックスのうち、範囲の端 ±2^(b−1) に張り付いた（飽和した）要素の割合
+  - `p_bytes_per_frame`: P フレーム 1 枚あたりの送信量（パリティ込み）
+  - `max_frame_bytes`: 1 フレームの送信量の最大値（I フレームとのばらつき・ピークを見る用）
+- 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
+
+```bash
+# 2 モデル × 6 ビット数（2/3/4/5/6/8）× 7 方式。ロスあり
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
+python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
+```
+
+Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
+`SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
+手元の Mac（8 コア）では resnet50 の 1 クリップに約 5 分かかったので、1 モデルあたり数時間かかります。
+
+```bash
+mkdir -p runs/slurm
+CONFIG=configs/packet_loss_ucf101_qfixed.yaml SCHEMES= sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+# 終わったらまとめて図にする
+python scripts/merge_results.py runs/packet_loss_ucf101_qfixed_*_2026* -o runs/packet_loss_ucf101_qfixed_merged
+python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_merged
+```
+
 ---
 
 ## レシピ 6: Shiba et al. の結果を再現できるか確かめる

@@ -318,6 +318,102 @@ def test_prs_requires_p_frames():
         TemporalEncoder("fd", 4, prs=True)
 
 
+# --- P フレームのステップ幅の固定（p_step="intra"） ------------------------------------------
+
+
+def test_quantize_with_given_step():
+    """step を指定すると、範囲を測らずにその q で量子化する（範囲外は b ビットの端に飽和する）。"""
+    x = torch.tensor([0.0, 0.3, -0.6, 1.0, 100.0])
+    idx, q = quantize(x, 4, "sym", step=0.5)
+    assert q == 0.5
+    assert idx.tolist() == [0, 1, -1, 2, 7]
+    # dead-zone: |x| < 0.75q は 0
+    assert quantize(x, 4, "dz", step=0.5)[0].tolist() == [0, 0, -1, 2, 7]
+    # theta は R = q·2^b/2 = 4 を基準にする（|x| < 0.25·4 = 1 は 0）
+    assert quantize(x, 4, "sym", theta=0.25, step=0.5)[0].tolist() == [0, 0, 0, 2, 7]
+    with pytest.raises(ValueError):
+        quantize(x, 4, "sym", step=0.0)
+
+
+@pytest.mark.parametrize("scale", [0.5, 1.0, 2.0])
+def test_intra_step_fixes_p_frame_step(scale):
+    """p_step="intra" の P フレームの q は I フレームの q × 倍率で、ロスなしなら端末とクラウドの f̂ が一致する。"""
+    feats = _video(T=12)
+    enc = TemporalEncoder("dpcm", 4, 6, "dz", p_step="intra", p_step_scale=scale)
+    dec = TemporalDecoder()
+    frames = []
+    for f in feats:
+        frame = enc.encode(f)
+        assert torch.equal(dec.decode(frame), enc.prev_hat)
+        frames.append(frame)
+    for i in (0, 6):
+        assert frames[i].kind == "I"
+        assert all(f.kind == "P" and f.q == frames[i].q * scale for f in frames[i + 1 : i + 6])
+
+
+def test_intra_step_reduces_entropy_of_small_residuals():
+    """差分が小さいとき、q を固定するとインデックスが 0 付近に集まってエントロピーが下がる（adaptive では下がらない）。"""
+    from splitcomp.temporal import entropy_bits
+
+    feats = _video(T=10, shape=(16, 8, 8), rho=0.99)
+    ent = {}
+    for p_step in ("adaptive", "intra"):
+        enc = TemporalEncoder("dpcm", 4, 30, "dz", p_step=p_step)
+        ent[p_step] = [entropy_bits(enc.encode(f).idx) for f in feats]
+    assert ent["intra"][0] == ent["adaptive"][0]  # I フレームは同じ
+    assert max(ent["intra"][1:]) < min(ent["adaptive"][1:])
+
+
+def test_adaptive_step_is_default():
+    """p_step の既定（adaptive）は、指定しないときと全く同じ符号化になる。"""
+    feats = _video(T=8)
+    a = TemporalEncoder("dpcm", 4, 30, "dz")
+    b = TemporalEncoder("dpcm", 4, 30, "dz", p_step="adaptive", p_step_scale=3.0)
+    for f in feats:
+        fa, fb = a.encode(f), b.encode(f)
+        assert fa.q == fb.q and torch.equal(fa.idx, fb.idx)
+
+
+def test_intra_step_follows_forced_intra():
+    """PRS で P フレームの代わりに I フレームにしたら、以降の P フレームはそのフレームの q を使う。"""
+    feats = _video(T=8)
+    enc = TemporalEncoder("dpcm", 4, 30, "dz", prs=True, p_step="intra")
+    frames = []
+    for t, f in enumerate(feats):
+        if t == 2:
+            enc.nack(0)  # GoP 先頭の I フレームが壊れた
+        frames.append(enc.encode(f))
+    assert frames[2].kind == "I" and frames[2].q != frames[0].q
+    assert frames[1].q == frames[0].q
+    assert all(f.q == frames[2].q for f in frames[3:])
+
+
+def test_invalid_p_step():
+    with pytest.raises(KeyError):
+        TemporalEncoder("dpcm", 4, p_step="foo")
+    with pytest.raises(ValueError):
+        TemporalEncoder("dpcm", 4, p_step="intra", p_step_scale=0.0)
+
+
+def test_sweep_encoding_key_distinguishes_step_settings():
+    """sweep の符号化の使い回しのキーは、clip / p_step / p_step_scale の違いを区別する（PRS・FEC・restorer は区別しない）。"""
+    from splitcomp.config import TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    base = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    key = sweep.encoding_key(base, 4)
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True), 4) == key
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+FEC10", "dpcm", "dz", fec=0.1), 4) == key
+    others = [
+        TemporalSchemeConfig("D+DZ+Cmax", "dpcm", "dz", clip="max"),
+        TemporalSchemeConfig("D+DZ+QI", "dpcm", "dz", p_step="intra"),
+        TemporalSchemeConfig("D+DZ+QI2", "dpcm", "dz", p_step="intra", p_step_scale=2.0),
+    ]
+    keys = {sweep.encoding_key(s, 4) for s in others}
+    assert len(keys) == 3 and key not in keys
+    assert sweep.encoding_key(base, 8) != key
+
+
 # --- パケット分割 -------------------------------------------------------------
 
 
@@ -734,6 +830,13 @@ def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cf
         acc.entropy += entropy_bits(frame.idx)
         acc.data_packets += layout.num_packets  # FEC なしでは、データパケットのロスがそのまま残る
         acc.residual_lost += int(lost.sum())
+        acc.max_frame_bytes = max(acc.max_frame_bytes, layout.bytes)
+        if frame.kind == "P":
+            half = 1 << (bits - 1)
+            acc.p_elements += frame.idx.numel()
+            acc.p_clamped += int(((frame.idx == -half) | (frame.idx == half - 1)).sum())
+            acc.p_frames += 1
+            acc.p_bytes += layout.bytes
     pred = tail(recon).argmax(-1)
     agree = (pred == ref_pred).double()
     mse = (recon - feats).pow(2).flatten(1).mean(1).double()
@@ -876,7 +979,7 @@ def test_fec_clip_costs_bytes_and_recovers_loss():
     c, d = run(prs, lossy), run(prs_fec, lossy)
     assert 0 < c.nacks and d.nacks < c.nacks
     for k, v in vars(run(prs, no_loss)).items():
-        if k not in ("bytes", "packets", "parity_packets"):
+        if k not in ("bytes", "packets", "parity_packets", "p_bytes", "max_frame_bytes"):
             got = vars(run(prs_fec, no_loss))[k]
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 

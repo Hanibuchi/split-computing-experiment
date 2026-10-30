@@ -1,0 +1,28 @@
+# =====================================================================
+# scripts/packet_loss_sweep.py 用の設定: P フレームのステップ幅 q を固定する方式（q 固定）の評価
+#   quick 設定（resnet50 / vgg16, Gilbert-Elliott のロス）を base にして、方式とビット数だけを置き換える。
+#
+#   D+DZ は P フレームごとに差分の範囲 R = P99(|δ|) から q を決め直すので、差分が小さくても送信量はあまり減らない
+#   （q も小さくなり、インデックスの分布の形が変わらないため）。q を I フレームの q に固定すると、差分が小さいほど
+#   インデックスが 0 付近に集まって送信量が減る。ここでは次のことを調べる:
+#     - 改善が「q を固定したこと」と「P99 クリップをやめたこと」のどちらから来ているか（D+DZ+Cmax と比べる）
+#     - 同じ送信量での一致率（ビット数を細かく振った rate_vs_agreement.png）と、q の倍率 0.5 / 1 / 2 の違い
+#     - P フレームの飽和率（clamp_rate.png）と、パケットロス・PRS との組み合わせ
+#
+#   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
+#   図:   python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
+# =====================================================================
+
+base: packet_loss_ucf101_quick.yaml
+experiment_name: packet_loss_ucf101_qfixed
+
+bits: [2, 3, 4, 5, 6, 8]
+
+schemes:
+  - {name: F+Sym, scheme: fd, p_quant: sym}
+  - {name: D+DZ, scheme: dpcm, p_quant: dz}
+  - {name: D+DZ+Cmax, scheme: dpcm, p_quant: dz, clip: max}                          # R = max|x|（クリップしない。q は毎フレーム決め直す）
+  - {name: D+DZ+QI, scheme: dpcm, p_quant: dz, p_step: intra}                        # P フレームの q = I フレームの q
+  - {name: D+DZ+QI0.5, scheme: dpcm, p_quant: dz, p_step: intra, p_step_scale: 0.5}  # q = I フレームの q × 0.5（細かい）
+  - {name: D+DZ+QI2, scheme: dpcm, p_quant: dz, p_step: intra, p_step_scale: 2.0}    # q = I フレームの q × 2（粗い）
+  - {name: D+DZ+QI+PRS, scheme: dpcm, p_quant: dz, p_step: intra, prs: true, feedback_delay: 1}  # q 固定 + PRS

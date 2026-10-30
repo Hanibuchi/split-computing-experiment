@@ -112,6 +112,14 @@ class _Accumulator:
         #: FEC: 送ったデータパケット数と、FEC で復元できずに残ったデータパケットのロス数
         self.data_packets = 0
         self.residual_lost = 0
+        #: P フレームの要素数と、そのうちインデックスが範囲の端 ±2^(b−1)（飽和）になった要素数
+        self.p_elements = 0
+        self.p_clamped = 0
+        #: P フレームの数と、その送信バイト数（パリティ込み）
+        self.p_frames = 0
+        self.p_bytes = 0
+        #: 1 フレームの送信バイト数（パリティ込み）の最大値
+        self.max_frame_bytes = 0
         self.pos_agree = np.zeros(gop)
         self.pos_mse = np.zeros(gop)
         self.pos_count = np.zeros(gop)
@@ -127,13 +135,35 @@ def _clip_seed(seed: int, clip: int) -> int:
 class EncodedClip:
     """1 クリップを端末側で符号化した結果（損失条件によらないので、全ての損失条件で使い回す）。"""
 
-    def __init__(self, frames: list, entropy: list[float], layouts: list[PacketLayout]):
+    def __init__(self, frames: list, entropy: list[float], layouts: list[PacketLayout], bits: int = 0):
         #: フレームごとの送信内容（EncodedFrame）
         self.frames = frames
         #: フレームごとのエントロピー [bit/要素]
         self.entropy = entropy
         #: フレームごとのパケット分割（パケットごとの適応算術符号）
         self.layouts = layouts
+        #: 量子化ビット数
+        self.bits = bits
+
+
+def make_encoder(cfg, scheme, bits, prs: bool = False) -> TemporalEncoder:
+    """方式の設定から端末側の符号化器を作る（prs=True なら NACK を受けて参照を選ぶ）。"""
+    return TemporalEncoder(
+        scheme.scheme,
+        bits,
+        cfg.gop,
+        scheme.p_quant,
+        clip=scheme.clip,
+        streams=scheme.streams,
+        prs=prs,
+        p_step=scheme.p_step,
+        p_step_scale=scheme.p_step_scale,
+    )
+
+
+def encoding_key(scheme, bits) -> tuple:
+    """端末側の符号化を決める設定（同じキーの方式は、フィードバックなしの符号化を使い回せる）。"""
+    return (scheme.scheme, scheme.p_quant, scheme.streams, scheme.clip, scheme.p_step, scheme.p_step_scale, bits)
 
 
 def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
@@ -141,17 +171,18 @@ def encode_clip(feats, cfg, scheme, bits) -> EncodedClip:
 
     端末はロスを知らないので、結果は損失モデル・シードによらない。
     """
-    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant, streams=scheme.streams)
+    enc = make_encoder(cfg, scheme, bits)
     frames = [enc.encode(feats[t]) for t in range(feats.shape[0])]
     layouts = [entropy_layout(f.idx, bits, cfg.mtu, cfg.interleave) for f in frames]
-    return EncodedClip(frames, entropy=[entropy_bits(f.idx) for f in frames], layouts=layouts)
+    return EncodedClip(frames, entropy=[entropy_bits(f.idx) for f in frames], layouts=layouts, bits=bits)
 
 
-def _transmit(layout: PacketLayout, loss, fec: float, acc: _Accumulator) -> np.ndarray:
+def _transmit(layout: PacketLayout, loss, fec: float, acc: _Accumulator, frame=None, bits: int = 0) -> np.ndarray:
     """1 フレームのパケット（と FEC のパリティ）を送ってロスを起こし、FEC で復元した後のデータパケットのロスを返す。
 
     データ k パケットの後にパリティ m = ceil(fec·k) パケットを続けて送る（fec = 0 なら m = 0 で、drop を k 個分呼ぶだけ）。
     パリティパケットの長さは一番長いデータパケットと同じとして送信量に足す。
+    frame（EncodedFrame）と bits を渡すと、P フレームの飽和率・送信量と 1 フレームの最大送信量も集計する。
     """
     k = layout.num_packets
     m = fec_parity(k, fec)
@@ -159,7 +190,15 @@ def _transmit(layout: PacketLayout, loss, fec: float, acc: _Accumulator) -> np.n
     lost_data = fec_recover(lost, k) if m else lost
     acc.lost_packets += int(lost.sum())  # 通信路での損失（パリティを含む）
     acc.packets += k + m
-    acc.bytes += layout.bytes + m * layout.max_bytes
+    nbytes = layout.bytes + m * layout.max_bytes
+    acc.bytes += nbytes
+    acc.max_frame_bytes = max(acc.max_frame_bytes, nbytes)
+    if frame is not None and frame.kind == "P":
+        half = 1 << (bits - 1)
+        acc.p_elements += frame.idx.numel()
+        acc.p_clamped += int(((frame.idx == -half) | (frame.idx == half - 1)).sum())
+        acc.p_frames += 1
+        acc.p_bytes += nbytes
     acc.parity_packets += m
     acc.data_packets += k
     acc.residual_lost += int(lost_data.sum())
@@ -181,7 +220,7 @@ def decode_clip(
 
     recon = torch.empty_like(feats)
     for t, (frame, layout) in enumerate(zip(encoded.frames, encoded.layouts)):
-        lost = _transmit(layout, loss, fec, acc)
+        lost = _transmit(layout, loss, fec, acc, frame, encoded.bits)
         recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
         acc.entropy += encoded.entropy[t]  # 以前の版と同じ順に足す（浮動小数点の和を一致させるため）
     _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc)
@@ -204,7 +243,7 @@ def prs_clip(
     """
     T = feats.shape[0]
     loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
-    enc = TemporalEncoder(scheme.scheme, bits, cfg.gop, scheme.p_quant, streams=scheme.streams, prs=True)
+    enc = make_encoder(cfg, scheme, bits, prs=True)
     dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
     arriving: dict[int, list[int]] = defaultdict(list)  # 端末に届くフレーム番号 → その時に届く NACK（壊れたフレームの番号）
 
@@ -218,7 +257,7 @@ def prs_clip(
             frame, layout, entropy = encoded.frames[t], encoded.layouts[t], encoded.entropy[t]
         else:
             layout, entropy = entropy_layout(frame.idx, bits, cfg.mtu, cfg.interleave), entropy_bits(frame.idx)
-        lost = _transmit(layout, loss, scheme.fec, acc)
+        lost = _transmit(layout, loss, scheme.fec, acc, frame, bits)
         recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
         if lost.any():
             arriving[t + scheme.feedback_delay].append(t)
@@ -453,8 +492,8 @@ def main() -> None:
 
     # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。クリップごとに 1 回だけ符号化して保持する
     # （PRS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
-    enc_count = Counter((s.scheme, s.p_quant, s.streams) for s in cfg.schemes)
-    reused_encodings = {(*key, b) for key, n in enc_count.items() if n > 1 for b in cfg.bits}
+    enc_count = Counter(encoding_key(s, b) for s in cfg.schemes for b in cfg.bits)
+    reused_encodings = {key for key, n in enc_count.items() if n > 1}
 
     dataset = build_dataset(cfg.data)
     print(f"クリップ {len(dataset)} 本を評価します（GoP={cfg.gop}, MTU={cfg.mtu}, concealment={cfg.concealment}）")
@@ -500,7 +539,7 @@ def main() -> None:
                     for bits in cfg.bits:
                         # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す。
                         # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）や、PRS の NACK を受ける前のフレームでも使い回す
-                        enc_key = (scheme.scheme, scheme.p_quant, scheme.streams, bits)
+                        enc_key = encoding_key(scheme, bits)
                         encoded = shared.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
                         if enc_key in reused_encodings:
                             shared[enc_key] = encoded
@@ -558,6 +597,9 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "prs": sc.prs,  # NACK による参照フレーム選択（PRS）
                 "feedback_delay": sc.feedback_delay if sc.prs else None,  # NACK が届くまでのフレーム数
                 "fec_rate": sc.fec,  # FEC のパリティの比率 r（0 = FEC なし）
+                "clip": sc.clip,  # 量子化の範囲 R の決め方（p99 / max）
+                "p_step": sc.p_step,  # P フレームの q の決め方（adaptive / intra）
+                "p_step_scale": sc.p_step_scale if sc.p_step == "intra" else None,  # intra の倍率
                 "coding": "adaptive_ac",  # パケットの符号化（packet_loss_plot.py が古い固定長の結果と見分ける用）
                 "gop": cfg.gop,
                 "loss": loss,
@@ -582,6 +624,11 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 # （loss_rate はパリティを含む通信路での損失率。FEC なしでは両者は一致する）
                 "parity_packets_per_frame": sum(a.parity_packets for a in group) / frames,
                 "residual_loss_rate": sum(a.residual_lost for a in group) / max(1, sum(a.data_packets for a in group)),
+                # P フレームの量子化インデックスのうち、範囲の端 ±2^(b−1) に張り付いた（飽和した）要素の割合
+                "clamp_rate": sum(a.p_clamped for a in group) / max(1, sum(a.p_elements for a in group)),
+                # P フレーム 1 枚あたりの送信量と、1 フレームの送信量の最大値（I フレームとの差・ピークの大きさを見る用）
+                "p_bytes_per_frame": sum(a.p_bytes for a in group) / max(1, sum(a.p_frames for a in group)),
+                "max_frame_bytes": max(a.max_frame_bytes for a in group),
             }
         )
         pos_count = sum(a.pos_count for a in group)

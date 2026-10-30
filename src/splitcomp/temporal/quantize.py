@@ -6,6 +6,8 @@
 - 範囲 R は |x| の 99 パーセンタイル（P99）。範囲外の値はクリップされる。
   ``clip="max"`` にすると R = max|x|（クリップしない。論文の Table 11/12 の比較用）。
 - スパース化しきい値 θ（論文の §V-D）: θ > 0 なら |x| < θ·R の値を量子化の前に 0 にする。
+- ステップ幅 q を外から指定することもできる（``step=``。P フレームの q を I フレームの q に固定する方式で使う）。
+  このとき R = q·2^b / 2 とみなし、範囲外の値はクリップされる。
 
 インデックスは b ビットで送れるように [-2^(b-1), 2^(b-1) - 1] に収める（送信時は +2^(b-1) して符号なしにする）。
 ``full_range=True`` なら論文どおり値を [-R, R] に収め、インデックスは [-2^(b-1), 2^(b-1)]（2^b + 1 段。b ビットには収まらない）。
@@ -68,7 +70,13 @@ def clip_range(x: torch.Tensor, clip: str = "p99") -> float:
 
 
 def quantize(
-    x: torch.Tensor, bits: int, mode: str = "sym", clip: str = "p99", theta: float = 0.0, full_range: bool = False
+    x: torch.Tensor,
+    bits: int,
+    mode: str = "sym",
+    clip: str = "p99",
+    theta: float = 0.0,
+    full_range: bool = False,
+    step: float | None = None,
 ) -> tuple[torch.Tensor, float]:
     """範囲 R を決めて量子化し、(インデックス, ステップ幅 q) を返す。
 
@@ -78,13 +86,20 @@ def quantize(
         theta: スパース化しきい値。|x| < theta·R の値は量子化の前に 0 にする（0 なら何もしない）。
         full_range: True なら値を [-R, R] に収める（インデックスは ±2^(b-1)。論文どおり）。
             False なら b ビットに収まる [-2^(b-1), 2^(b-1) - 1]。
+        step: ステップ幅 q。指定すると x から範囲を測らず（clip は使わない）、この q で量子化する。
     """
     if mode not in QUANTIZERS:
         raise KeyError(f"未知の量子化方式です: {mode!r}（使えるもの: {sorted(QUANTIZERS)}）")
-    R = clip_range(x, clip)
+    if step is None:
+        R = clip_range(x, clip)
+        q = step_size(R, bits)
+    else:
+        if step <= 0:
+            raise ValueError(f"step は正の値にしてください: {step}")
+        q = float(step)
+        R = q * (1 << bits) / 2
     if theta > 0:
         x = torch.where(x.abs() < theta * R, torch.zeros_like(x), x)
-    q = step_size(R, bits)
     return QUANTIZERS[mode](x, bits, q, full_range), q
 
 
