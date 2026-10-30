@@ -984,6 +984,130 @@ def test_fec_clip_costs_bytes_and_recovers_loss():
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 
+def _parallel_setup():
+    """並列化のテスト用の小さな設定（PRS・FEC・多系列を含む。MTU を小さくして 1 フレームを複数パケットに分ける）。"""
+    from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
+
+    schemes = [
+        TemporalSchemeConfig("F+Sym", "fd", "sym"),
+        TemporalSchemeConfig("D+DZ", "dpcm", "dz"),
+        TemporalSchemeConfig("D+DZ+S2", "dpcm", "dz", streams=2),
+        TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, feedback_delay=1),
+        TemporalSchemeConfig("D+DZ+PRS3", "dpcm", "dz", prs=True, feedback_delay=3),
+        TemporalSchemeConfig("D+DZ+FEC25", "dpcm", "dz", fec=0.25),
+    ]
+    losses = [
+        LossConfig("bernoulli", 0.0),
+        LossConfig("bernoulli", 0.1),
+        LossConfig("gilbert_elliott", 0.1, burst_len=3),
+        LossConfig("gilbert_elliott", 0.3, burst_len=3),
+    ]
+    cfg = PacketLossConfig(schemes=schemes, bits=[2, 4], gop=5, mtu=60, losses=losses, seeds=[0, 1])
+    conditions = [(l, s) for l in losses for s in (cfg.seeds if l.p > 0 else cfg.seeds[:1])]
+    torch.manual_seed(0)
+    tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10)).eval()
+    clips = []
+    for clip in range(2):
+        feats = _video(T=12, shape=(8, 7, 7), seed=clip)
+        with torch.no_grad():
+            clips.append((feats, tail(feats).argmax(-1)))
+    return cfg, conditions, tail, clips
+
+
+def _assert_accs_equal(got: dict, want: dict):
+    import numpy as np
+
+    assert list(got) == list(want)  # 挿入順（= results の行の順）も同じ
+    for key, acc in want.items():
+        for k, v in vars(acc).items():
+            g = vars(got[key])[k]
+            assert np.array_equal(g, v) if isinstance(v, np.ndarray) else g == v, (key, k)
+
+
+def _accs_by_tasks(sweep, cfg, conditions, clips, run):
+    """クリップの順・(方式, ビット数, 条件) の順に、run(clip, 方式の番号, bits, feats, ref_pred) の結果を足し込む。"""
+    from collections import defaultdict
+
+    accs = defaultdict(lambda: sweep._Accumulator(cfg.gop))
+    for clip, (feats, ref_pred) in enumerate(clips):
+        for si, scheme in enumerate(cfg.schemes):
+            for bits in cfg.bits:
+                for (loss_cfg, seed), res in zip(conditions, run(clip, si, bits, feats, ref_pred)):
+                    sweep._apply(accs[(scheme.name, bits, loss_cfg.display_name(), seed)], res, cfg)
+    return accs
+
+
+def test_run_task_matches_per_condition():
+    """_run_task（tail を全条件まとめて 1 回・PRS のパケット分割キャッシュあり）の結果を足し込むと、
+    条件ごとに decode_clip / prs_clip を呼ぶ以前の版とビット単位で一致する。"""
+    from collections import defaultdict
+
+    sweep = _load_script("packet_loss_sweep")
+    cfg, conditions, tail, clips = _parallel_setup()
+
+    want = defaultdict(lambda: sweep._Accumulator(cfg.gop))
+    for clip, (feats, ref_pred) in enumerate(clips):
+        for scheme in cfg.schemes:
+            for bits in cfg.bits:
+                encoded = sweep.encode_clip(feats, cfg, scheme, bits)
+                for loss_cfg, seed in conditions:
+                    acc = want[(scheme.name, bits, loss_cfg.display_name(), seed)]
+                    if scheme.prs:
+                        sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, bits, loss_cfg, seed, clip, acc, encoded=encoded)
+                    else:
+                        sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, seed, clip, acc, fec=scheme.fec)
+
+    reused = frozenset({sweep.encoding_key(cfg.schemes[1], b) for b in cfg.bits})  # D+DZ / PRS / FEC は符号化が同じ
+    sweep._init_worker(cfg, tail, torch.device("cpu"), {}, conditions, reused_encodings=reused)
+    got = _accs_by_tasks(sweep, cfg, conditions, clips, sweep._run_task)
+    _assert_accs_equal(got, want)
+    assert sum(a.nacks for k, a in got.items() if "PRS" in k[0]) > 0  # PRS で NACK を受けた後のフレームも通っている
+
+
+def test_layout_cache_reuses_identical_indices():
+    """_layout_cached: 同じ量子化インデックスなら計算し直さずに同じ結果を返し、違うインデックスでは計算し直す。"""
+    from splitcomp.config import PacketLossConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    cfg = PacketLossConfig(mtu=60)
+    idx = torch.randint(-8, 8, (400,))
+    cache = {}
+    layout, entropy = sweep._layout_cached(idx, 4, cfg, cache)
+    again, entropy2 = sweep._layout_cached(idx.clone(), 4, cfg, cache)
+    assert again is layout and entropy2 == entropy and len(cache) == 1
+    other = idx.clone()
+    other[0] = (other[0] + 1) % 8
+    layout3, _ = sweep._layout_cached(other, 4, cfg, cache)
+    assert layout3 is not layout and len(cache) == 2
+    ref = sweep.entropy_layout(idx, 4, cfg.mtu, cfg.interleave)
+    assert torch.equal(layout.assign, ref.assign) and (layout.num_packets, layout.bytes) == (ref.num_packets, ref.bytes)
+
+
+def test_run_task_in_worker_processes_matches_in_process(monkeypatch):
+    """ワーカープロセス（spawn・共有メモリで特徴を渡す）で _run_task を実行しても、1 プロセスで実行した結果と一致する。"""
+    import multiprocessing
+    import sys
+    from concurrent.futures import ProcessPoolExecutor
+    from pathlib import Path
+
+    # spawn のワーカーが関数を import できるよう、scripts/ を sys.path に入れて普通のモジュールとして読む
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    monkeypatch.delitem(sys.modules, "packet_loss_sweep", raising=False)
+    import packet_loss_sweep as sweep
+
+    cfg, conditions, tail, clips = _parallel_setup()
+    sweep._init_worker(cfg, tail, torch.device("cpu"), {}, conditions)
+    want = _accs_by_tasks(sweep, cfg, conditions, clips, sweep._run_task)
+
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(2, mp_context=ctx, initializer=sweep._init_worker, initargs=(cfg, tail, torch.device("cpu"), {}, conditions, 1)) as pool:
+        for feats, ref_pred in clips:
+            feats.share_memory_()
+            ref_pred.share_memory_()
+        got = _accs_by_tasks(sweep, cfg, conditions, clips, lambda *a: pool.submit(sweep._run_task, *a).result())
+    _assert_accs_equal(got, want)
+
+
 # --- ロス補修 net（D+DZ+R） --------------------------------------------------------
 
 

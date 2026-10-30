@@ -28,6 +28,8 @@
 #SBATCH -p GPU                      # GPU のあるノード。GRES は未設定なので --gres は付けない
 #SBATCH -N 1                        # ノード数
 #SBATCH -c 12                       # CPU コア数。指定しないと 1 コアになり、符号化（CPU）が極端に遅くなる
+#                                   tail が CPU（ALLOW_CPU=1 など）のときは、この数のワーカープロセスで並列に処理する
+#                                   （ワーカー 1 つあたり約 1GB のメモリが要る。数を変えたいときは EXTRA="--workers 8"）
 #SBATCH -t 2-00:00:00               # 時間制限（GPU パーティションの上限 2 日）。切れたら RESUME で再開する
 #SBATCH --array=0-3                 # 配列の番号 = 設定の targets の番号
 #SBATCH -o runs/slurm/%x_%A_%a.out  # 標準出力（%A: 配列ジョブ ID, %a: 配列の番号）

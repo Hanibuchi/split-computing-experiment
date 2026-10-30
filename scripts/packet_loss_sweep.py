@@ -19,7 +19,16 @@ NACK として返し（feedback_delay フレーム後に端末に届く）、端
 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
 ただし PRS は端末の符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う（:func:`prs_clip`）。
-torch の CPU スレッド数は、ジョブに割り当てられたコア数（os.sched_getaffinity）を超えないように調整する。
+PRS でフィードバックによって符号化し直したフレームのパケット分割は、量子化インデックスが同じなら損失条件をまたいで使い回す。
+
+並列化: 1 クリップの (方式, ビット数) 1 組を 1 タスクとして、ワーカープロセス（--workers。既定はジョブに割り当てられた
+コア数 = os.sched_getaffinity）で並列に処理する（:func:`_run_task`）。各ワーカーは torch を 1 スレッドで動かし、
+符号化 → 全損失条件の復号 → tail（全損失条件をまとめて 1 回のバッチ）までを行う。集計値への足し込みはメインプロセスが
+クリップの順・(方式, ビット数, 条件) の順に行うので、結果は 1 プロセスで順に処理した場合と同じになる
+（torch のスレッド数が違うと、tail や特徴 MSE の計算が浮動小数点の最後の桁でずれることはある）。
+メインプロセスは、ワーカーが処理している間に次のクリップの head を計算して投入しておく（最大 :data:`LOOKAHEAD` クリップ先まで）。
+tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 のときは、ワーカーを使わず 1 プロセスで順に処理する。
+メインプロセスの torch の CPU スレッド数（head の計算用）は、ジョブに割り当てられたコア数を超えないように調整する。
 
 出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
@@ -55,18 +64,24 @@ torch の CPU スレッド数は、ジョブに割り当てられたコア数（
 
     # 途中で止まった実行を再開する
     python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20261013-120000
+
+    # ワーカー数を指定する（1 にするとワーカーを使わず 1 プロセスで動かす）
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --workers 16
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
+import multiprocessing
 import os
 import pickle
 import statistics
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -205,7 +220,98 @@ def _transmit(layout: PacketLayout, loss, fec: float, acc: _Accumulator, frame=N
     return lost_data
 
 
+#: :class:`_Accumulator` の整数のフィールドのうち、クリップごとの値を足し込むもの（max_frame_bytes は最大値を取る）
+_COUNT_FIELDS = (
+    "lost_packets",
+    "packets",
+    "bytes",
+    "nacks",
+    "forced_intra",
+    "parity_packets",
+    "data_packets",
+    "residual_lost",
+    "p_elements",
+    "p_clamped",
+    "p_frames",
+    "p_bytes",
+)
+
+
+class _CondResult:
+    """1 クリップ × 1 条件（方式 × ビット数 × 損失 × シード）の結果。ワーカーが計算し、メインが :func:`_apply` で足し込む。
+
+    浮動小数点の和の順序が 1 プロセスで順に処理した場合と同じになるよう、足す値をそのままの形で持つ。
+    """
+
+    def __init__(self, counts: dict, entropies: list, agree: np.ndarray, mse: np.ndarray, agree_sum: int, mse_sum: float):
+        #: 整数の集計値（:data:`_COUNT_FIELDS` と max_frame_bytes）
+        self.counts = counts
+        #: フレームごとのエントロピー [bit/要素]（足す順）
+        self.entropies = entropies
+        #: フレームごとの top-1 一致（0/1）と特徴 MSE（長さ T の float64）
+        self.agree = agree
+        self.mse = mse
+        #: agree.sum() と mse.sum()（torch で和を取った値。以前の版と同じ計算）
+        self.agree_sum = agree_sum
+        self.mse_sum = mse_sum
+
+
+def _apply(acc: _Accumulator, res: _CondResult, cfg) -> None:
+    """1 クリップ × 1 条件の結果を集計値に足し込む（以前の版の decode_clip / prs_clip / _score と同じ順序で足す）。"""
+    for name in _COUNT_FIELDS:
+        setattr(acc, name, getattr(acc, name) + res.counts[name])
+    acc.max_frame_bytes = max(acc.max_frame_bytes, res.counts["max_frame_bytes"])
+    for e in res.entropies:
+        acc.entropy += e
+    T = len(res.agree)
+    pos = (torch.arange(T) % cfg.gop).numpy()
+    acc.agree += res.agree_sum
+    acc.frames += T
+    acc.mse += res.mse_sum
+    np.add.at(acc.pos_agree, pos, res.agree)
+    np.add.at(acc.pos_mse, pos, res.mse)
+    np.add.at(acc.pos_count, pos, 1)
+
+
 @torch.no_grad()
+def _evaluate(parts: list, feats, ref_pred, tail, tail_dev) -> list[_CondResult]:
+    """復元した特徴を tail に通し、条件ごとの結果を返す。
+
+    parts は条件ごとの (送信の集計値 _Accumulator, 復元した特徴 recon[T, ...], エントロピーの list)。
+    全ての条件の recon をつなげて、tail を 1 回のバッチで呼ぶ。
+    """
+    T = feats.shape[0]
+    recons = [recon for _, recon, _ in parts]
+    batch = torch.cat(recons) if len(recons) > 1 else recons[0]
+    preds = tail(batch.to(tail_dev)).argmax(-1).cpu()
+    out = []
+    for i, (part, recon, entropies) in enumerate(parts):
+        agree = (preds[i * T : (i + 1) * T] == ref_pred).double()
+        mse = (recon - feats).pow(2).flatten(1).mean(1).double()
+        counts = {name: getattr(part, name) for name in _COUNT_FIELDS}
+        counts["max_frame_bytes"] = part.max_frame_bytes
+        out.append(_CondResult(counts, entropies, agree.numpy(), mse.numpy(), int(agree.sum()), float(mse.sum())))
+    return out
+
+
+@torch.no_grad()
+def _decode_recon(encoded: EncodedClip, feats, cfg, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, fec: float = 0.0):
+    """符号化済みの 1 クリップにロスを起こして復号し、(復元した特徴, フレームごとのエントロピーの list) を返す。
+
+    送信量などの整数の集計値は acc に加算する。損失の乱数はクリップとシードで決まり、フレームごとに drop を 1 回呼ぶ。
+    """
+    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
+    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
+
+    recon = torch.empty_like(feats)
+    entropies = []
+    for t, (frame, layout) in enumerate(zip(encoded.frames, encoded.layouts)):
+        lost = _transmit(layout, loss, fec, acc, frame, encoded.bits)
+        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
+        entropies.append(encoded.entropy[t])
+    return recon, entropies
+
+
 def decode_clip(
     encoded: EncodedClip, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, fec: float = 0.0
 ) -> None:
@@ -215,20 +321,75 @@ def decode_clip(
     restorer（LossRestorer）を渡すと、P フレームでロスが起きたときに欠けた要素を補う。
     fec > 0 なら、各フレームにパリティを付けて送り、落ちた数がパリティ数以下ならクラウドで全て復元する（:func:`_transmit`）。
     """
-    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
-    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
+    part = _Accumulator(cfg.gop)
+    recon, entropies = _decode_recon(encoded, feats, cfg, loss_cfg, seed, clip, part, restorer, fec)
+    (res,) = _evaluate([(part, recon, entropies)], feats, ref_pred, tail, tail_dev)
+    _apply(acc, res, cfg)
 
-    recon = torch.empty_like(feats)
-    for t, (frame, layout) in enumerate(zip(encoded.frames, encoded.layouts)):
-        lost = _transmit(layout, loss, fec, acc, frame, encoded.bits)
-        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
-        acc.entropy += encoded.entropy[t]  # 以前の版と同じ順に足す（浮動小数点の和を一致させるため）
-    _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc)
+
+def _layout_cached(idx: torch.Tensor, bits: int, cfg, cache: dict | None) -> tuple[PacketLayout, float]:
+    """量子化インデックス idx の (パケット分割, エントロピー)。cache（dict）を渡すと、同じ idx の結果を使い回す。
+
+    キーは idx の内容のハッシュで、当たったときは idx が本当に同じかを確かめてから使う（結果は使い回さない場合と完全に一致する）。
+    """
+    if cache is None:
+        return entropy_layout(idx, bits, cfg.mtu, cfg.interleave), entropy_bits(idx)
+    key = hashlib.blake2b(idx.numpy().tobytes(), digest_size=16).digest()
+    hit = cache.get(key)
+    if hit is not None and torch.equal(hit[0], idx):
+        return hit[1], hit[2]
+    layout, entropy = entropy_layout(idx, bits, cfg.mtu, cfg.interleave), entropy_bits(idx)
+    cache[key] = (idx, layout, entropy)
+    return layout, entropy
 
 
 @torch.no_grad()
+def _prs_recon(
+    feats, cfg, scheme, bits, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, encoded: EncodedClip | None = None, layout_cache: dict | None = None
+):
+    """PRS で 1 クリップを符号化・ロス・復号し、(復元した特徴, フレームごとのエントロピーの list) を返す（:func:`prs_clip` の本体）。"""
+    T = feats.shape[0]
+    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
+    enc = make_encoder(cfg, scheme, bits, prs=True)
+    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
+    arriving: dict[int, list[int]] = defaultdict(list)  # 端末に届くフレーム番号 → その時に届く NACK（壊れたフレームの番号）
+
+    recon = torch.empty_like(feats)
+    entropies = []
+    for t in range(T):
+        for s in arriving.pop(t, []):
+            enc.nack(s)
+        frame = enc.encode(feats[t])
+        if encoded is not None and not enc.nacked:
+            # この GoP でまだ NACK を受けていないので、フィードバックなしの符号化と同じフレーム
+            frame, layout, entropy = encoded.frames[t], encoded.layouts[t], encoded.entropy[t]
+        else:
+            layout, entropy = _layout_cached(frame.idx, bits, cfg, layout_cache)
+        lost = _transmit(layout, loss, scheme.fec, acc, frame, bits)
+        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
+        if lost.any():
+            arriving[t + scheme.feedback_delay].append(t)
+            acc.nacks += 1
+        entropies.append(entropy)
+    acc.forced_intra += enc.forced_intra
+    return recon, entropies
+
+
 def prs_clip(
-    feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, encoded: EncodedClip | None = None
+    feats,
+    ref_pred,
+    tail,
+    tail_dev,
+    cfg,
+    scheme,
+    bits,
+    loss_cfg,
+    seed,
+    clip,
+    acc: _Accumulator,
+    restorer=None,
+    encoded: EncodedClip | None = None,
+    layout_cache: dict | None = None,
 ) -> None:
     """PRS で 1 クリップを符号化・ロス・復号し、tail を通して acc に加算する（端末とクラウドを 1 フレームずつ交互に動かす閉ループ）。
 
@@ -239,47 +400,86 @@ def prs_clip(
     encoded に同じ (方式, P の量子化, 系列数, ビット数) をフィードバックなしで符号化した結果（:func:`encode_clip`）を渡すと、
     今の GoP でまだ NACK を受けていない（= フィードバックなしと同じ符号化になる）フレームでは、そのパケット分割とエントロピーを
     使い回す（パケット分割が重いので。結果は使い回さない場合と完全に一致する）。
+    layout_cache に dict を渡すと、NACK を受けた後のフレームでも、量子化インデックスが同じならパケット分割を使い回す
+    （同じ dict を同じクリップ・方式・ビット数の損失条件の間で共有する。:func:`_layout_cached`）。
     scheme.fec > 0 なら FEC を併用し、FEC で復元できなかったフレームだけ NACK を返す。
     """
-    T = feats.shape[0]
-    loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
-    enc = make_encoder(cfg, scheme, bits, prs=True)
-    dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
-    arriving: dict[int, list[int]] = defaultdict(list)  # 端末に届くフレーム番号 → その時に届く NACK（壊れたフレームの番号）
+    part = _Accumulator(cfg.gop)
+    recon, entropies = _prs_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
+    (res,) = _evaluate([(part, recon, entropies)], feats, ref_pred, tail, tail_dev)
+    _apply(acc, res, cfg)
 
-    recon = torch.empty_like(feats)
-    for t in range(T):
-        for s in arriving.pop(t, []):
-            enc.nack(s)
-        frame = enc.encode(feats[t])
-        if encoded is not None and not enc.nacked:
-            # この GoP でまだ NACK を受けていないので、フィードバックなしの符号化と同じフレーム
-            frame, layout, entropy = encoded.frames[t], encoded.layouts[t], encoded.entropy[t]
+
+# ---------------------------------------------------------------------------
+# 並列化（1 クリップの (方式, ビット数) 1 組 = 1 タスク）
+# ---------------------------------------------------------------------------
+
+#: メインプロセスが先に head を計算してタスクを投入しておくクリップ数（今のクリップの先に何本まで）
+LOOKAHEAD = 2
+
+#: タスクの実行に使う状態（:func:`_init_worker` で設定する。ワーカーを使わないときはメインプロセスで設定する）
+_WORKER: dict = {}
+
+
+def _init_worker(cfg, tail, tail_dev, restorers: dict, conditions: list, threads: int | None = None, reused_encodings=frozenset()) -> None:
+    """タスクの実行に使う状態を設定する（ワーカープロセスの initializer。threads を渡すと torch のスレッド数をそれにする）。
+
+    reused_encodings（複数の方式で同じになる符号化のキー）を渡すと、同じクリップの符号化をタスクの間で使い回す
+    （ワーカーを使わず 1 プロセスで順に処理するとき用。ワーカーではメモリを食うので使い回さない）。
+    """
+    if threads:
+        torch.set_num_threads(threads)
+    _WORKER.clear()
+    _WORKER.update(
+        cfg=cfg,
+        tail=tail,
+        tail_dev=tail_dev,
+        restorers=restorers,
+        conditions=conditions,
+        reused_encodings=reused_encodings,
+        encodings=(None, {}),  # (クリップ番号, 符号化のキー → EncodedClip)
+    )
+
+
+@torch.no_grad()
+def _run_task(clip: int, scheme_index: int, bits: int, feats, ref_pred) -> list[_CondResult]:
+    """1 クリップの (方式, ビット数) 1 組を、全ての損失条件・シードについて処理し、条件の順に結果を返す。
+
+    符号化（損失条件によらないので 1 回）→ 条件ごとの復号（PRS は符号化と復号を交互に行う閉ループ）→ tail（全条件まとめて 1 回）。
+    """
+    w = _WORKER
+    cfg = w["cfg"]
+    scheme = cfg.schemes[scheme_index]
+    restorer = w["restorers"].get(scheme.name)
+
+    # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）では、同じクリップの符号化を使い回す（1 プロセスで動かすときだけ）
+    enc_key = encoding_key(scheme, bits)
+    enc_clip, encodings = w["encodings"]
+    if enc_clip != clip:
+        encodings = {}
+        w["encodings"] = (clip, encodings)
+    encoded = encodings.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
+    if enc_key in w["reused_encodings"]:
+        encodings[enc_key] = encoded
+
+    # PRS で NACK を受けた後のフレームのパケット分割を、損失条件の間で使い回す
+    layout_cache = {} if scheme.prs else None
+    parts = []
+    for loss_cfg, seed in w["conditions"]:
+        part = _Accumulator(cfg.gop)
+        if scheme.prs:
+            recon, entropies = _prs_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
         else:
-            layout, entropy = entropy_layout(frame.idx, bits, cfg.mtu, cfg.interleave), entropy_bits(frame.idx)
-        lost = _transmit(layout, loss, scheme.fec, acc, frame, bits)
-        recon[t] = dec.decode(frame, received_mask(lost, layout.assign) if lost.any() else None)
-        if lost.any():
-            arriving[t + scheme.feedback_delay].append(t)
-            acc.nacks += 1
-        acc.entropy += entropy
-    acc.forced_intra += enc.forced_intra
-    _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc)
+            recon, entropies = _decode_recon(encoded, feats, cfg, loss_cfg, seed, clip, part, restorer, scheme.fec)
+        parts.append((part, recon, entropies))
+    return _evaluate(parts, feats, ref_pred, w["tail"], w["tail_dev"])
 
 
-def _score(recon, feats, ref_pred, tail, tail_dev, cfg, acc: _Accumulator) -> None:
-    """復元した特徴 recon[T, ...] を tail に通し、元モデルとの一致率・特徴 MSE・GoP 位置ごとの値を acc に加算する。"""
-    T = recon.shape[0]
-    pred = tail(recon.to(tail_dev)).argmax(-1).cpu()
-    agree = (pred == ref_pred).double()
-    mse = (recon - feats).pow(2).flatten(1).mean(1).double()
-    pos = torch.arange(T) % cfg.gop
-    acc.agree += int(agree.sum())
-    acc.frames += T
-    acc.mse += float(mse.sum())
-    np.add.at(acc.pos_agree, pos.numpy(), agree.numpy())
-    np.add.at(acc.pos_mse, pos.numpy(), mse.numpy())
-    np.add.at(acc.pos_count, pos.numpy(), 1)
+def available_cores() -> int:
+    """このプロセスに割り当てられたコア数（os.sched_getaffinity が無い環境（macOS など）ではマシンのコア数）。"""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
 
 
 def limit_cpu_threads() -> int:
@@ -437,6 +637,13 @@ def main() -> None:
         p.add_argument("--scheme", action="append", metavar="NAME", help="実行する方式（設定の schemes の name）。複数回指定可。省略時は全て")
         p.add_argument("--list-targets", action="store_true", help="設定にある target を番号付きで表示して終了する")
         p.add_argument("--resume", type=Path, metavar="RUN_DIR", help="途中で止まった実行フォルダの続きから再開する（設定はそのフォルダの config.yaml を使う）")
+        p.add_argument(
+            "--workers",
+            type=int,
+            default=None,
+            metavar="N",
+            help="(方式, ビット数) を並列に処理するワーカープロセスの数（既定: 割り当てられたコア数）。1 ならワーカーを使わない",
+        )
 
     cfg, args = parse_cli(PacketLossConfig, __doc__, extra_args=extra)
     if args.resume:
@@ -465,6 +672,12 @@ def main() -> None:
     print(f"CPU スレッド数: {threads}")
     head_dev, tail_dev = resolve_device(cfg.devices.head), resolve_device(cfg.devices.tail)
     print(f"デバイス: head={head_dev}, tail={tail_dev}")
+    workers = args.workers if args.workers is not None else available_cores()
+    if workers > 1 and tail_dev.type != "cpu":
+        print(f"tail が {tail_dev} なので、ワーカープロセスは使わず 1 プロセスで処理します（並列化は tail が cpu のときだけ）")
+        workers = 1
+    workers = max(1, workers)
+    print(f"ワーカープロセス数: {workers}" + ("（使わない）" if workers == 1 else "（各 1 スレッド）"))
     done: set[str] = set()
     if args.resume:
         run_dir = args.resume
@@ -481,7 +694,9 @@ def main() -> None:
         if args.target:
             name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
         run_dir = make_run_dir(cfg.output_dir, name)
-        save_run_info(run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev), "cpu_threads": threads})
+        save_run_info(
+            run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev), "cpu_threads": threads, "workers": workers}
+        )
         print(f"結果の保存先: {run_dir}")
     print(f"途中で止まったら次のコマンドで再開できます: python scripts/packet_loss_sweep.py --resume {run_dir}")
 
@@ -490,10 +705,10 @@ def main() -> None:
     for name, r in restorers.items():
         print(f"{name}: ロス補修 net を使います（学習条件: {r.meta}）")
 
-    # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。クリップごとに 1 回だけ符号化して保持する
-    # （PRS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
+    # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。1 プロセスで動かすときは、クリップごとに 1 回だけ符号化して
+    # 使い回す（PRS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
     enc_count = Counter(encoding_key(s, b) for s in cfg.schemes for b in cfg.bits)
-    reused_encodings = {key for key, n in enc_count.items() if n > 1}
+    reused_encodings = frozenset(key for key, n in enc_count.items() if n > 1)
 
     dataset = build_dataset(cfg.data)
     print(f"クリップ {len(dataset)} 本を評価します（GoP={cfg.gop}, MTU={cfg.mtu}, concealment={cfg.concealment}）")
@@ -503,6 +718,11 @@ def main() -> None:
     for loss_cfg in cfg.losses:
         for seed in cfg.seeds if loss_cfg.p > 0 else cfg.seeds[:1]:
             conditions.append((loss_cfg, seed))
+
+    # 1 クリップのタスク = (方式の番号, ビット数)。結果はこの順（以前の版のループの順）に足し込む
+    tasks = [(si, bits) for si in range(len(cfg.schemes)) for bits in cfg.bits]
+    # 投入は重い PRS（損失条件ごとに符号化し直す）から先にする（待ち時間を減らすため。結果の順には影響しない）
+    submit_order = sorted(range(len(tasks)), key=lambda i: not cfg.schemes[tasks[i][0]].prs)
 
     with ResultWriter(run_dir) as writer, ResultWriter(run_dir, "gop_curve") as curve_writer:
         for target in cfg.targets:
@@ -527,35 +747,56 @@ def main() -> None:
                 start_clip, shape, saved = ckpt
                 accs.update(saved)
                 print(f"  チェックポイントから再開: クリップ {start_clip + 1}/{len(dataset)} から")
-            started = time.perf_counter()
-            for clip in range(start_clip, len(dataset)):
+
+            pool = None
+            if workers > 1:
+                # fork は torch / OpenMP のスレッドを持った状態で固まることがあるので spawn にする。
+                # tail・restorer の重みは torch の仕組みで共有メモリに置かれ、ワーカーごとにはコピーされない
+                pool = ProcessPoolExecutor(
+                    workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_init_worker,
+                    initargs=(cfg, tail, tail_dev, restorers, conditions, 1),
+                )
+            else:
+                _init_worker(cfg, tail, tail_dev, restorers, conditions, reused_encodings=reused_encodings)
+
+            def submit(clip: int) -> tuple[list[int], dict]:
+                """クリップ clip の head を計算してタスクを投入し、(特徴の形状, タスクの番号 → Future) を返す。
+
+                ワーカーを使わないときは、Future の代わりに :func:`_run_task` の引数を返すだけ（足し込むときに実行する）。
+                """
                 x, _ = dataset[clip]
                 with torch.no_grad():
                     ref_pred = model(x.to(tail_dev)).argmax(-1).cpu()
                     (feats,) = head(x.to(head_dev))
                 feats = feats.float().cpu()
-                shared: dict[tuple, EncodedClip] = {}
-                for scheme in cfg.schemes:
-                    for bits in cfg.bits:
-                        # 符号化は損失条件によらないので 1 回だけ行い、全ての損失条件・シードで使い回す。
-                        # 符号化が同じで復号だけ違う方式（D+DZ と D+DZ+R など）や、PRS の NACK を受ける前のフレームでも使い回す
-                        enc_key = encoding_key(scheme, bits)
-                        encoded = shared.get(enc_key) or encode_clip(feats, cfg, scheme, bits)
-                        if enc_key in reused_encodings:
-                            shared[enc_key] = encoded
-                        restorer = restorers.get(scheme.name)
-                        for loss_cfg, seed in conditions:
-                            key = (scheme.name, bits, loss_cfg.display_name(), seed)
-                            if scheme.prs:
-                                # PRS は符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う
-                                prs_clip(feats, ref_pred, tail, tail_dev, cfg, scheme, bits, loss_cfg, seed, clip, accs[key], restorer, encoded)
-                            else:
-                                decode_clip(encoded, feats, ref_pred, tail, tail_dev, cfg, loss_cfg, seed, clip, accs[key], restorer, scheme.fec)
-                        del encoded
-                del shared
-                shape = list(feats.shape[1:])
-                save_checkpoint(run_dir, target, clip + 1, len(dataset), shape, accs)
-                print(f"  クリップ {clip + 1}/{len(dataset)} 完了（経過 {time.perf_counter() - started:.0f} 秒）", flush=True)
+                if pool is None:
+                    return list(feats.shape[1:]), {i: (clip, *tasks[i], feats, ref_pred) for i in range(len(tasks))}
+                # タスクごとに特徴（resnet50/layer2 で 1 クリップ 48MB）を pickle しないよう、共有メモリに置いてから渡す
+                feats.share_memory_()
+                ref_pred.share_memory_()
+                return list(feats.shape[1:]), {i: pool.submit(_run_task, clip, *tasks[i], feats, ref_pred) for i in submit_order}
+
+            try:
+                started = time.perf_counter()
+                pending: deque[tuple[list[int], dict]] = deque()
+                next_clip = start_clip
+                for clip in range(start_clip, len(dataset)):
+                    # ワーカーを使うときは、今のクリップを待つ間に先のクリップのタスクも投入しておく
+                    while next_clip < len(dataset) and len(pending) <= (LOOKAHEAD if pool is not None else 0):
+                        pending.append(submit(next_clip))
+                        next_clip += 1
+                    shape, jobs = pending.popleft()
+                    for i, (si, bits) in enumerate(tasks):
+                        results = jobs[i].result() if pool is not None else _run_task(*jobs[i])
+                        for (loss_cfg, seed), res in zip(conditions, results):
+                            _apply(accs[(cfg.schemes[si].name, bits, loss_cfg.display_name(), seed)], res, cfg)
+                    save_checkpoint(run_dir, target, clip + 1, len(dataset), shape, accs)
+                    print(f"  クリップ {clip + 1}/{len(dataset)} 完了（経過 {time.perf_counter() - started:.0f} 秒）", flush=True)
+            finally:
+                if pool is not None:
+                    pool.shutdown(cancel_futures=True)
 
             rows, curve = _summarize(cfg, target, shape, accs)
             # gop_curve を先に書く（results の行がそろっていれば gop_curve もそろっている、という再開時の判定のため）
