@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1270 1000" width="1270" height="1000" font-family="Helvetica, Arial, sans-serif" font-size="15">
+  <!-- D+DZ+PRS のシステム全体図。Shiba et al. (IEEE Access 2026) の FIGURE 1 と同じ構成・配色で、PRS で加わるブロック（薄紫）と NACK を書き足したもの -->
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#222"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#777"/>
+    </marker>
+    <style>
+      .box { stroke-width: 1.3; }
+      .ln { fill: none; stroke: #222; stroke-width: 1.4; }
+      .dash { fill: none; stroke: #777; stroke-width: 1.4; stroke-dasharray: 6 4; }
+      .prs { fill: #e8dcf5; stroke: #8e6bbf; stroke-width: 1.3; }
+      .m { font-family: 'Times New Roman', 'STIX Two Text', serif; font-style: italic; font-size: 18px; }
+      .title { font-size: 21px; font-weight: bold; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1270" height="1000" fill="#ffffff"/>
+
+  <!-- ================= Edge Device ================= -->
+  <rect x="20" y="20" width="560" height="960" rx="18" fill="#fff8e6" stroke="#f0c987" stroke-width="1.5"/>
+  <text x="44" y="60" class="title">Edge Device</text>
+
+  <rect x="225" y="36" width="90" height="32" rx="6" fill="#fff" stroke="#333" class="box"/>
+  <text x="270" y="58" text-anchor="middle" class="m">x<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <path d="M270,68 V102" class="ln" marker-end="url(#arr)"/>
+
+  <rect x="195" y="102" width="150" height="52" fill="#ffe08a" stroke="#d6a400" class="box"/>
+  <text x="270" y="133" text-anchor="middle">Head Network</text>
+  <path d="M270,154 V200" class="ln" marker-end="url(#arr)"/>
+  <text x="280" y="184" class="m">f<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <polygon points="270,200 315,230 270,260 225,230" fill="#fff2cc" stroke="#d6a400" class="box"/>
+  <text x="270" y="235" text-anchor="middle">I / P ?</text>
+
+  <path d="M225,230 H115 V402" class="ln" marker-end="url(#arr)"/>
+  <text x="168" y="220" text-anchor="middle" font-weight="bold" fill="#d32f2f" font-size="18">I</text>
+  <path d="M315,230 H430 V300" class="ln" marker-end="url(#arr)"/>
+  <text x="372" y="220" text-anchor="middle" font-weight="bold" fill="#1e5bb8" font-size="18">P</text>
+
+  <rect x="355" y="300" width="150" height="48" fill="#fff8c4" stroke="#c9a800" class="box"/>
+  <text x="430" y="330" text-anchor="middle" class="m">f<tspan baseline-shift="sub" font-size="13">t</tspan> − f̂<tspan baseline-shift="sub" font-size="13">ref</tspan></text>
+  <path d="M430,348 V402" class="ln" marker-end="url(#arr)"/>
+  <text x="440" y="382" class="m">δ′<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <rect x="40" y="402" width="150" height="56" fill="#f8a5a5" stroke="#c0392b" class="box"/>
+  <text x="115" y="426" text-anchor="middle">Symmetric</text>
+  <text x="115" y="446" text-anchor="middle">Quantization</text>
+
+  <rect x="355" y="402" width="150" height="56" fill="#90c2ff" stroke="#1e5bb8" class="box"/>
+  <text x="430" y="426" text-anchor="middle">Dead-Zone</text>
+  <text x="430" y="446" text-anchor="middle">Quantization</text>
+
+  <!-- Q(δ'_t) / Q(f_t) を通信路へ（f̂_ref の破線 x=530 と P 側の縦線 x=430 をまたぐ） -->
+  <path d="M505,430 H524 a6,6 0 0 1 12,0 H630" class="ln" marker-end="url(#arr)"/>
+  <text x="545" y="421" class="m" font-size="16">Q(δ′<tspan baseline-shift="sub" font-size="12">t</tspan>)</text>
+  <path d="M115,458 V512" class="ln" marker-end="url(#arr)"/>
+  <circle cx="115" cy="490" r="3" fill="#222"/>
+  <path d="M115,490 H424 a6,6 0 0 1 12,0 H524 a6,6 0 0 1 12,0 H630" class="ln" marker-end="url(#arr)"/>
+  <text x="250" y="481" class="m" font-size="16">Q(f<tspan baseline-shift="sub" font-size="12">t</tspan>)</text>
+
+  <rect x="40" y="512" width="150" height="48" fill="#dde3ff" stroke="#7b83d6" class="box"/>
+  <text x="115" y="541" text-anchor="middle">Dequantization</text>
+  <path d="M430,458 V512" class="ln" marker-end="url(#arr)"/>
+  <rect x="355" y="512" width="150" height="48" fill="#dde3ff" stroke="#7b83d6" class="box"/>
+  <text x="430" y="541" text-anchor="middle">Dequantization</text>
+
+  <path d="M430,560 V622" class="ln" marker-end="url(#arr)"/>
+  <text x="440" y="598" class="m">δ̂′<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <rect x="355" y="622" width="150" height="48" fill="#fff8c4" stroke="#c9a800" class="box"/>
+  <text x="430" y="652" text-anchor="middle" class="m">f̂<tspan baseline-shift="sub" font-size="13">ref</tspan> + δ̂′<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <path d="M115,560 V788 H185" class="ln" marker-end="url(#arr)"/>
+  <text x="124" y="690" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <path d="M430,670 V788 H355" class="ln" marker-end="url(#arr)"/>
+  <text x="440" y="736" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <rect x="185" y="762" width="170" height="52" fill="#ccf5de" stroke="#2e9d5b" class="box"/>
+  <text x="270" y="793" text-anchor="middle">Buffer</text>
+
+  <!-- PRS: Buffer から壊れていない参照フレームを選ぶ -->
+  <path d="M270,814 V858" class="dash" marker-end="url(#arrG)"/>
+  <rect x="185" y="858" width="170" height="48" class="prs"/>
+  <text x="270" y="887" text-anchor="middle">Reference Selection</text>
+  <path d="M355,882 H530 V324 H507" class="dash" marker-end="url(#arrG)"/>
+  <path d="M530,646 H507" class="dash" marker-end="url(#arrG)"/>
+  <text x="536" y="600" class="m" fill="#555">f̂<tspan baseline-shift="sub" font-size="13">ref</tspan></text>
+
+  <!-- ================= Channel ================= -->
+  <rect x="630" y="300" width="120" height="440" rx="14" fill="#e6e6ea" stroke="#999" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="690" y="527" text-anchor="middle" class="title">Channel</text>
+
+  <!-- ================= Cloud Server ================= -->
+  <rect x="790" y="20" width="460" height="960" rx="18" fill="#eef5ff" stroke="#9fc0f0" stroke-width="1.5"/>
+  <text x="814" y="60" class="title">Cloud Server</text>
+
+  <path d="M750,400 H953" class="ln" marker-end="url(#arr)"/>
+  <text x="800" y="389" class="m" font-size="16">Q(δ′<tspan baseline-shift="sub" font-size="12">t</tspan>), Q(f<tspan baseline-shift="sub" font-size="12">t</tspan>)</text>
+
+  <!-- PRS: ロスの検出 -->
+  <circle cx="772" cy="400" r="3" fill="#222"/>
+  <path d="M772,400 V882 H803" class="ln" marker-end="url(#arr)"/>
+  <rect x="805" y="858" width="130" height="48" class="prs"/>
+  <text x="870" y="887" text-anchor="middle">Loss Detection</text>
+
+  <rect x="955" y="376" width="150" height="48" fill="#dde3ff" stroke="#7b83d6" class="box"/>
+  <text x="1030" y="405" text-anchor="middle">Dequantization</text>
+  <path d="M1030,424 V460" class="ln" marker-end="url(#arr)"/>
+
+  <polygon points="1030,460 1075,490 1030,520 985,490" fill="#fff2cc" stroke="#d6a400" class="box"/>
+  <text x="1030" y="495" text-anchor="middle">I / P ?</text>
+
+  <path d="M985,490 H900 V706 H943" class="ln" marker-end="url(#arr)"/>
+  <text x="942" y="480" text-anchor="middle" font-weight="bold" fill="#d32f2f" font-size="18">I</text>
+  <text x="908" y="600" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <path d="M1075,490 H1170 V558" class="ln" marker-end="url(#arr)"/>
+  <text x="1120" y="480" text-anchor="middle" font-weight="bold" fill="#1e5bb8" font-size="18">P</text>
+  <text x="1178" y="531" class="m">δ̂′<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <rect x="1105" y="560" width="130" height="48" fill="#fff8c4" stroke="#c9a800" class="box"/>
+  <text x="1170" y="590" text-anchor="middle" class="m">f̂<tspan baseline-shift="sub" font-size="13">ref</tspan> + δ̂′<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <path d="M1170,608 V706 H1117" class="ln" marker-end="url(#arr)"/>
+  <text x="1178" y="662" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <rect x="945" y="682" width="170" height="48" fill="#fff8c4" stroke="#c9a800" class="box"/>
+  <text x="1030" y="711" text-anchor="middle">Concealment</text>
+  <path d="M1030,730 V778" class="ln" marker-end="url(#arr)"/>
+  <text x="1040" y="761" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <rect x="945" y="778" width="170" height="52" fill="#ccf5de" stroke="#2e9d5b" class="box"/>
+  <text x="1030" y="809" text-anchor="middle">Buffer</text>
+  <path d="M1115,804 H1243 V584 H1237" class="dash" marker-end="url(#arrG)"/>
+  <text x="1182" y="790" class="m" fill="#555">f̂<tspan baseline-shift="sub" font-size="13">ref</tspan></text>
+
+  <path d="M1030,830 V872" class="ln" marker-end="url(#arr)"/>
+  <text x="1040" y="858" class="m">f̂<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <rect x="955" y="872" width="150" height="48" fill="#bcd7ff" stroke="#4a7fd6" class="box"/>
+  <text x="1030" y="901" text-anchor="middle">Tail Network</text>
+  <path d="M1030,920 V940" class="ln" marker-end="url(#arr)"/>
+  <rect x="995" y="940" width="70" height="30" rx="6" fill="#fff" stroke="#333" class="box"/>
+  <text x="1030" y="962" text-anchor="middle" class="m">ŷ<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+
+  <!-- NACK（クラウド → 端末）。枠に隠れないよう最後に描く -->
+  <path d="M870,906 V948 H270 V908" class="dash" marker-end="url(#arrG)"/>
+  <text x="690" y="938" text-anchor="middle" class="m" fill="#555">NACK(t)</text>
+</svg>

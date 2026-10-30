@@ -407,6 +407,8 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 
 ### PRS: 壊れたフレームの番号だけを返す参照フレーム選択（D+DZ+PRS / D+DZ+PRS3）
 
+仕組みの詳しい解説（具体例・実測例・前提）は [d_dz_prs.md](d_dz_prs.md) を参照。
+
 動画符号化の Reference Picture Selection（NACK モード）を応用したもの。D+DZ は端末がロスを知らないので、ロスが次の I フレームまで伝搬します。
 PRS では、クラウドが **パケットが 1 つでも落ちたフレームの番号だけ** を NACK として端末に返します（届いたフレームには何も返さない）。
 端末は NACK を受け取ったら、それ以降のフレームを **クラウド側で壊れていないフレーム** を参照して符号化するので、
