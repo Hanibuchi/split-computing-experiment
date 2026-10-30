@@ -214,8 +214,9 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3 / D+DZ+FEC10 / D+DZ+FEC25
-（D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は、python で直接実行するときと同じく設定の `schemes` が全て実行される。絞るときは `SCHEMES="F+Sym D+DZ"` のように名前を並べる（`--scheme` に当たる）。
+本番の設定の D+DZ+R はロス補修 net（`checkpoints/restorer_resnet50_layer2.pt`）が要るので、まだ学習していないときは
+`SCHEMES="F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3 D+DZ+FEC10 D+DZ+FEC25"` と D+DZ+R を除いて投げる（除かないと開始直後にエラーで止まる）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
 
@@ -530,13 +531,12 @@ python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```
 
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
-`SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
 今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm
-CONFIG=configs/packet_loss_ucf101_qfixed.yaml SCHEMES= sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
 # 終わったらまとめて図にする
 python scripts/merge_results.py runs/packet_loss_ucf101_qfixed_*_2026* -o runs/packet_loss_ucf101_qfixed_merged
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_merged

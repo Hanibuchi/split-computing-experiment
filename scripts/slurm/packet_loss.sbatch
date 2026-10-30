@@ -8,13 +8,15 @@
 #   リポジトリのトップで投げる（ログの出力先 runs/slurm/ は先に作っておく。Slurm は作ってくれない）:
 #     mkdir -p runs/slurm
 #     sbatch scripts/slurm/packet_loss.sbatch                     # 全 4 モデル（配列 0-3）
+#     CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch   # 別の設定（target 2 つ）
+#     SCHEMES="F+Sym D+DZ" sbatch scripts/slurm/packet_loss.sbatch  # 方式を絞る
 #     sbatch --array=1 scripts/slurm/packet_loss.sbatch           # target 1 番（resnet50）だけ
 #     EXTRA="data.kwargs.num_clips=2 seeds=[0]" sbatch --array=1 scripts/slurm/packet_loss.sbatch   # 動作確認
 #     RESUME=runs/packet_loss_ucf101_resnet50_20261023-120000 sbatch --array=1 scripts/slurm/packet_loss.sbatch  # 再開
 #
 #   環境変数（sbatch は投げたシェルの環境変数をジョブに引き継ぐ）:
 #     CONFIG   設定ファイル（既定 configs/packet_loss_ucf101.yaml）
-#     SCHEMES  実行する方式の name（空白区切り。既定 "F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3 D+DZ+FEC10 D+DZ+FEC25"。空にすると設定の全方式）
+#     SCHEMES  実行する方式の name（空白区切り）。python の --scheme に当たる。既定は空で、設定の schemes を全て実行する
 #     EXTRA    packet_loss_sweep.py にそのまま渡す追加の引数（key=value の上書きなど。空白区切り）
 #     RESUME   途中で止まった実行フォルダ。指定すると --resume で続きから再開する（CONFIG / SCHEMES は無視される）
 #     VENV     有効にする仮想環境（既定 .venv）
@@ -41,7 +43,7 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 CONFIG="${CONFIG:-configs/packet_loss_ucf101.yaml}"
-SCHEMES="${SCHEMES-F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3 D+DZ+FEC10 D+DZ+FEC25}"   # :- ではなく - なので、SCHEMES= と空にすると全方式
+SCHEMES="${SCHEMES:-}"
 EXTRA="${EXTRA:-}"
 RESUME="${RESUME:-}"
 VENV="${VENV:-.venv}"
