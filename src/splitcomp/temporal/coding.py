@@ -30,6 +30,14 @@ PRS（Reference Picture Selection, prs=True）:
     とする。ロスがなければ prs=False と全く同じ符号化になる。参照先はパケットヘッダの「種類」u8 の残り 7 ビットに
     t − ref として入れる（GoP ≤ 128 なら足りる）ので、ヘッダは増えない。
 
+P フレームのステップ幅（p_step）:
+    adaptive : P フレームごとに、送る差分の範囲 R（既定は |δ| の P99）から q = 2R/2^b を決め直す（論文どおり）。
+               差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形（= エントロピー・送信量）は
+               I フレームとあまり変わらない。差分にした効果は量子化誤差が小さくなる形で表れる
+    intra    : P フレームの q を、直近の I フレームの q × p_step_scale に固定する。差分が小さいほどインデックスが 0 付近に集まり、
+               送信量が減る。差分が ±2^(b−1)·q を超えた要素はクリップ（飽和）される。PRS で P フレームの代わりに I フレームにしたときは、
+               そのフレームの q に切り替える。q は毎フレームのパケットのヘッダで送っているので、復号器は変わらない
+
 パケットロスの扱い:
     端末（:class:`TemporalEncoder`）はロスを知らない（フィードバックなし）。そのため DPCM でロスが起きると
     端末とクラウドの f̂ がずれ、そのずれは次の I フレームまで残る。
@@ -54,6 +62,7 @@ from .quantize import dequantize, quantize
 
 SCHEMES = ("fd", "dwd", "dpcm")
 CONCEALMENTS = ("hold", "zero")
+P_STEPS = ("adaptive", "intra")
 
 
 @dataclass
@@ -87,6 +96,8 @@ class TemporalEncoder:
         streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
         full_range: True なら量子化の値を [−R, R] に収める（インデックスは ±2^(b−1) で b ビットに収まらない。論文の再現用）。
         prs: True ならクラウドからの NACK（:meth:`nack`）を受けて、クラウド側で壊れていないフレームを参照する（PRS）。fd では使えない。
+        p_step: P フレームのステップ幅の決め方 "adaptive"（毎フレーム決め直す）/ "intra"（直近の I フレームの q に固定）。
+        p_step_scale: p_step="intra" のときの倍率（P フレームの q = I フレームの q × p_step_scale）。
     """
 
     def __init__(
@@ -100,6 +111,8 @@ class TemporalEncoder:
         streams: int = 1,
         full_range: bool = False,
         prs: bool = False,
+        p_step: str = "adaptive",
+        p_step_scale: float = 1.0,
     ):
         if scheme not in SCHEMES:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
@@ -107,6 +120,10 @@ class TemporalEncoder:
             raise ValueError(f"streams は 1 以上にしてください（{streams}）")
         if prs and scheme == "fd":
             raise ValueError("fd は P フレームが無いので prs は使えません")
+        if p_step not in P_STEPS:
+            raise KeyError(f"未知の p_step です: {p_step!r}（使えるもの: {P_STEPS}）")
+        if p_step_scale <= 0:
+            raise ValueError(f"p_step_scale は正の値にしてください（{p_step_scale}）")
         self.scheme = scheme
         self.bits = bits
         self.gop = gop
@@ -116,6 +133,8 @@ class TemporalEncoder:
         self.streams = streams
         self.full_range = full_range
         self.prs = prs
+        self.p_step = p_step
+        self.p_step_scale = p_step_scale
         self.reset()
 
     def reset(self) -> None:
@@ -130,6 +149,8 @@ class TemporalEncoder:
         self.nacked: set[int] = set()
         #: 参照できる無事なフレームが無く、P フレームの代わりに I フレームにした回数（prs=True のとき）
         self.forced_intra = 0
+        #: 直近の I フレームのステップ幅 q（p_step="intra" の P フレームで使う）
+        self.q_intra: float | None = None
 
     def nack(self, t: int) -> None:
         """クラウドから「フレーム t が壊れた」という NACK を受け取る（prs=True のときに使う）。
@@ -185,10 +206,12 @@ class TemporalEncoder:
             idx, q = quantize(f, self.bits, "sym", self.clip, self.theta, self.full_range)
             recon = dequantize(idx, q)
             kind = "I"
+            self.q_intra = q
         else:
             ref_true, ref_hat = self.history[ref]
             base = ref_true if self.scheme == "dwd" else ref_hat
-            idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta, self.full_range)
+            step = self.q_intra * self.p_step_scale if self.p_step == "intra" else None
+            idx, q = quantize(f - base, self.bits, self.p_quant, self.clip, self.theta, self.full_range, step)
             recon = ref_hat + dequantize(idx, q)
             kind = "P"
         self.prev_true = f

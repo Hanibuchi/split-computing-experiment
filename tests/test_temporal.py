@@ -19,6 +19,8 @@ from splitcomp.temporal import (
     build_loss_model,
     deadzone_quantize,
     entropy_layout,
+    fec_parity,
+    fec_recover,
     frame_bytes,
     num_packets,
     packet_assignment,
@@ -316,6 +318,102 @@ def test_prs_requires_p_frames():
         TemporalEncoder("fd", 4, prs=True)
 
 
+# --- P フレームのステップ幅の固定（p_step="intra"） ------------------------------------------
+
+
+def test_quantize_with_given_step():
+    """step を指定すると、範囲を測らずにその q で量子化する（範囲外は b ビットの端に飽和する）。"""
+    x = torch.tensor([0.0, 0.3, -0.6, 1.0, 100.0])
+    idx, q = quantize(x, 4, "sym", step=0.5)
+    assert q == 0.5
+    assert idx.tolist() == [0, 1, -1, 2, 7]
+    # dead-zone: |x| < 0.75q は 0
+    assert quantize(x, 4, "dz", step=0.5)[0].tolist() == [0, 0, -1, 2, 7]
+    # theta は R = q·2^b/2 = 4 を基準にする（|x| < 0.25·4 = 1 は 0）
+    assert quantize(x, 4, "sym", theta=0.25, step=0.5)[0].tolist() == [0, 0, 0, 2, 7]
+    with pytest.raises(ValueError):
+        quantize(x, 4, "sym", step=0.0)
+
+
+@pytest.mark.parametrize("scale", [0.5, 1.0, 2.0])
+def test_intra_step_fixes_p_frame_step(scale):
+    """p_step="intra" の P フレームの q は I フレームの q × 倍率で、ロスなしなら端末とクラウドの f̂ が一致する。"""
+    feats = _video(T=12)
+    enc = TemporalEncoder("dpcm", 4, 6, "dz", p_step="intra", p_step_scale=scale)
+    dec = TemporalDecoder()
+    frames = []
+    for f in feats:
+        frame = enc.encode(f)
+        assert torch.equal(dec.decode(frame), enc.prev_hat)
+        frames.append(frame)
+    for i in (0, 6):
+        assert frames[i].kind == "I"
+        assert all(f.kind == "P" and f.q == frames[i].q * scale for f in frames[i + 1 : i + 6])
+
+
+def test_intra_step_reduces_entropy_of_small_residuals():
+    """差分が小さいとき、q を固定するとインデックスが 0 付近に集まってエントロピーが下がる（adaptive では下がらない）。"""
+    from splitcomp.temporal import entropy_bits
+
+    feats = _video(T=10, shape=(16, 8, 8), rho=0.99)
+    ent = {}
+    for p_step in ("adaptive", "intra"):
+        enc = TemporalEncoder("dpcm", 4, 30, "dz", p_step=p_step)
+        ent[p_step] = [entropy_bits(enc.encode(f).idx) for f in feats]
+    assert ent["intra"][0] == ent["adaptive"][0]  # I フレームは同じ
+    assert max(ent["intra"][1:]) < min(ent["adaptive"][1:])
+
+
+def test_adaptive_step_is_default():
+    """p_step の既定（adaptive）は、指定しないときと全く同じ符号化になる。"""
+    feats = _video(T=8)
+    a = TemporalEncoder("dpcm", 4, 30, "dz")
+    b = TemporalEncoder("dpcm", 4, 30, "dz", p_step="adaptive", p_step_scale=3.0)
+    for f in feats:
+        fa, fb = a.encode(f), b.encode(f)
+        assert fa.q == fb.q and torch.equal(fa.idx, fb.idx)
+
+
+def test_intra_step_follows_forced_intra():
+    """PRS で P フレームの代わりに I フレームにしたら、以降の P フレームはそのフレームの q を使う。"""
+    feats = _video(T=8)
+    enc = TemporalEncoder("dpcm", 4, 30, "dz", prs=True, p_step="intra")
+    frames = []
+    for t, f in enumerate(feats):
+        if t == 2:
+            enc.nack(0)  # GoP 先頭の I フレームが壊れた
+        frames.append(enc.encode(f))
+    assert frames[2].kind == "I" and frames[2].q != frames[0].q
+    assert frames[1].q == frames[0].q
+    assert all(f.q == frames[2].q for f in frames[3:])
+
+
+def test_invalid_p_step():
+    with pytest.raises(KeyError):
+        TemporalEncoder("dpcm", 4, p_step="foo")
+    with pytest.raises(ValueError):
+        TemporalEncoder("dpcm", 4, p_step="intra", p_step_scale=0.0)
+
+
+def test_sweep_encoding_key_distinguishes_step_settings():
+    """sweep の符号化の使い回しのキーは、clip / p_step / p_step_scale の違いを区別する（PRS・FEC・restorer は区別しない）。"""
+    from splitcomp.config import TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    base = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    key = sweep.encoding_key(base, 4)
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True), 4) == key
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+FEC10", "dpcm", "dz", fec=0.1), 4) == key
+    others = [
+        TemporalSchemeConfig("D+DZ+Cmax", "dpcm", "dz", clip="max"),
+        TemporalSchemeConfig("D+DZ+QI", "dpcm", "dz", p_step="intra"),
+        TemporalSchemeConfig("D+DZ+QI2", "dpcm", "dz", p_step="intra", p_step_scale=2.0),
+    ]
+    keys = {sweep.encoding_key(s, 4) for s in others}
+    assert len(keys) == 3 and key not in keys
+    assert sweep.encoding_key(base, 8) != key
+
+
 # --- パケット分割 -------------------------------------------------------------
 
 
@@ -362,6 +460,7 @@ def test_entropy_layout_fits_mtu_and_covers_all(bits, interleave):
     sizes = AC_HEADER_BYTES + torch.ceil(adaptive_code_bits(counts) / 8).long() + AC_TAIL_BYTES
     assert int(sizes.max()) <= mtu
     assert int(sizes.sum()) == layout.bytes
+    assert int(sizes.max()) == layout.max_bytes  # FEC のパリティパケットの長さ
     if not interleave:
         assert bool((layout.assign[1:] >= layout.assign[:-1]).all())  # 先頭から順に詰まっている
 
@@ -375,6 +474,30 @@ def test_entropy_layout_shrinks_sparse_frames(interleave):
     ac = entropy_layout(idx, bits, 1400, interleave)
     assert ac.num_packets < num_packets(n, bits) / 5
     assert ac.bytes < frame_bytes(n, bits) / 5
+
+
+def test_fec_parity_count():
+    assert fec_parity(20, 0.1) == 2
+    assert fec_parity(20, 0.25) == 5
+    assert fec_parity(3, 0.1) == 1  # 切り上げなので少なくとも 1 個
+    assert fec_parity(20, 0.0) == 0
+    assert fec_parity(0, 0.5) == 0
+
+
+def test_fec_recover_up_to_parity_count():
+    """k+m 個のうち落ちた数が m 以下なら全て復元し、超えたらデータパケットのロスがそのまま残る。"""
+    k, m = 6, 2
+    lost = np.zeros(k + m, dtype=bool)
+    lost[[1, 7]] = True  # データ 1 個 + パリティ 1 個
+    assert not fec_recover(lost, k).any()
+    lost[[1, 4]] = True  # データ 2 個（パリティが 2 個あるので復元できる）
+    lost[7] = False
+    assert not fec_recover(lost, k).any()
+    lost[6] = True  # 3 個落ちたので復元できない
+    np.testing.assert_array_equal(fec_recover(lost, k), lost[:k])
+    # パリティなしなら素通し
+    lost = np.array([False, True, False])
+    np.testing.assert_array_equal(fec_recover(lost, 3), lost)
 
 
 def test_received_mask_drops_packet_elements():
@@ -705,6 +828,15 @@ def _run_clip_reference(sweep, feats, ref_pred, tail, cfg, scheme, bits, loss_cf
         acc.packets += layout.num_packets
         acc.bytes += layout.bytes
         acc.entropy += entropy_bits(frame.idx)
+        acc.data_packets += layout.num_packets  # FEC なしでは、データパケットのロスがそのまま残る
+        acc.residual_lost += int(lost.sum())
+        acc.max_frame_bytes = max(acc.max_frame_bytes, layout.bytes)
+        if frame.kind == "P":
+            half = 1 << (bits - 1)
+            acc.p_elements += frame.idx.numel()
+            acc.p_clamped += int(((frame.idx == -half) | (frame.idx == half - 1)).sum())
+            acc.p_frames += 1
+            acc.p_bytes += layout.bytes
     pred = tail(recon).argmax(-1)
     agree = (pred == ref_pred).double()
     mse = (recon - feats).pow(2).flatten(1).mean(1).double()
@@ -800,6 +932,55 @@ def test_prs_clip_matches_dpcm_without_loss_and_helps_with_loss():
         c, d = run(prs, loss_cfg), run(prs, loss_cfg, reuse=True)
         for k, v in vars(c).items():
             got = vars(d)[k]
+            assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
+
+
+def test_fec_clip_costs_bytes_and_recovers_loss():
+    """sweep の FEC: ロスなしなら D+DZ と精度が同じで送信量だけ増え、ロスありでは残るロスと特徴 MSE が減る。PRS とも組み合わせられる。"""
+    import numpy as np
+
+    from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
+
+    sweep = _load_script("packet_loss_sweep")
+    dz = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    fec = TemporalSchemeConfig("D+DZ+FEC25", "dpcm", "dz", fec=0.25)
+    prs = TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True)
+    prs_fec = TemporalSchemeConfig("D+DZ+PRS+FEC", "dpcm", "dz", prs=True, fec=0.25)
+    cfg = PacketLossConfig(schemes=[dz, fec], bits=[4], gop=15, mtu=60)
+    torch.manual_seed(0)
+    tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
+    feats = _video(T=15, shape=(8, 7, 7))
+    ref_pred = tail(feats).argmax(-1)
+    encoded = sweep.encode_clip(feats, cfg, dz, 4)
+
+    def run(scheme, loss_cfg):
+        acc = sweep._Accumulator(cfg.gop)
+        if scheme.prs:
+            sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc)
+        else:
+            sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, 0, 0, acc, fec=scheme.fec)
+        return acc
+
+    no_loss = LossConfig("bernoulli", 0.0)
+    a, b = run(dz, no_loss), run(fec, no_loss)
+    assert a.agree == b.agree and a.mse == b.mse
+    assert a.parity_packets == 0 and b.parity_packets > 0
+    assert b.packets == a.packets + b.parity_packets
+    assert b.bytes > a.bytes * 1.25 * 0.9  # パリティは一番長いデータパケットと同じ長さ
+    assert np.array_equal(a.pos_mse, b.pos_mse)
+
+    lossy = LossConfig("bernoulli", 0.1)
+    a, b = run(dz, lossy), run(fec, lossy)
+    assert a.residual_lost == a.lost_packets  # FEC なしでは通信路のロスがそのまま残る
+    assert b.residual_lost / b.data_packets < a.residual_lost / a.data_packets
+    assert b.mse < a.mse
+
+    # PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返す
+    c, d = run(prs, lossy), run(prs_fec, lossy)
+    assert 0 < c.nacks and d.nacks < c.nacks
+    for k, v in vars(run(prs, no_loss)).items():
+        if k not in ("bytes", "packets", "parity_packets", "p_bytes", "max_frame_bytes"):
+            got = vars(run(prs_fec, no_loss))[k]
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 

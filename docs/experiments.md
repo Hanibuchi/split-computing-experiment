@@ -202,7 +202,7 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3 / D+DZ+FEC10 / D+DZ+FEC25
 （D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
@@ -446,6 +446,88 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - ロス耐性: `agreement_drop` が D+DZ よりどれだけ小さいか、d = 1 と d = 3 の差（フィードバックが遅いほど伝搬が長い）
 - 送信量: 参照が古くなると差分が大きくなるので、ロスありでは `bytes_per_frame` が D+DZ より少し増えうる。強制 I フレームの分も含まれる
 - `gop_curve.csv` で、ロス後の劣化が d フレームで回復しているか
+
+### FEC: パケット単位の消失訂正（D+DZ+FEC10 / D+DZ+FEC25）
+
+フィードバックを使わない古典的なロス対策です。端末は各フレームのデータ k パケットの後に、パリティ m = ceil(r·k) パケットを続けて送ります。
+符号は Reed-Solomon 相当の MDS 消失訂正符号を想定しています。UDP ではビット誤りのあるパケットはチェックサムで捨てられ、
+どのパケットが落ちたかは連番で分かるので、ここでのロスは「消失」として扱えます。
+
+- クラウドは、k+m 個のうち **落ちた数が m 以下ならフレーム全体を完全に復元** します（どのパケットが落ちても同じ）
+- m を超えたら復元できず、届いたデータパケットだけを使います（systematic 符号なので、データパケットはそのまま読める）。
+  欠けた要素は FEC なしと同じく concealment（と restorer）で補います
+- 実際の RS 符号化はせず、復元できるかどうかと送信量だけを正確に計算します
+- パリティパケットの長さは、そのフレームで一番長いデータパケット（`PacketLayout.max_bytes`）と同じとします。
+  ヘッダの要素数 u32 を k, m の u16×2 に置き換えるので、ヘッダの長さも変わりません
+- 符号はフレーム内で閉じているので、遅延は増えません。そのかわり次の弱点があります
+  - **frame**（フレーム単位の全損失）: パリティも一緒に消えるので、まったく効きません
+  - **Gilbert-Elliott**（バースト）: 1 フレームの中で連続して落ちると、パリティが足りなくなりやすいです
+  - パケット数が少ないフレーム（疎な P フレームや 2 ビット）では m が 1 になり、比率 r より冗長になります（切り上げのため）
+- 設定は方式の `fec: r`（`configs/packet_loss_ucf101.yaml` に D+DZ+FEC10（r=0.1）/ D+DZ+FEC25（r=0.25）がある）。
+  符号化は D+DZ と同じなので、パケット分割は D+DZ のものを使い回します。PRS（`prs: true`）や restorer とも組み合わせられます。
+  PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返します
+- Python からは `fec_parity(k, r)` でパリティ数、`fec_recover(lost, k)` で復元後のデータパケットのロスを求めます（`splitcomp.temporal`）
+- 結果の列:
+  - `fec_rate`: パリティの比率 r（0 = FEC なし）
+  - `parity_packets_per_frame`: 1 フレームあたりのパリティのパケット数（`packets_per_frame` と `bytes_per_frame` はパリティを含む）
+  - `loss_rate`: パリティを含む、通信路での損失率
+  - `residual_loss_rate`: FEC で復元した後の、データパケットの損失率（FEC なしでは `loss_rate` と一致する）
+
+```bash
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+FEC10 --scheme D+DZ+FEC25
+```
+
+実測例（ResNet50 / layer2, 4 ビット, Gilbert-Elliott L=4, 2 クリップ・シード 1 つの動作確認なので値は粗い）:
+
+| 方式 | 送信量 [B/フレーム] | p=0.05: residual_loss_rate | p=0.05: agreement_drop | p=0.1: residual_loss_rate | p=0.1: agreement_drop |
+|---|---|---|---|---|---|
+| D+DZ | 87,743 | 0.048 | 0.30 | 0.094 | 0.58 |
+| D+DZ+FEC10 | 97,193（+10.8%） | 0.030 | 0.00 | 0.072 | 0.48 |
+| D+DZ+FEC25 | 110,400（+25.8%） | 0.000 | 0.00 | 0.029 | 0.32 |
+
+確認ポイント:
+- `no_loss` で D+DZ と `agreement` / `feature_mse` が一致し、`bytes_per_frame` だけが約 r 以上増えること（ロスがなくても常にかかる代償）
+- `residual_loss_rate` が `loss_rate` よりどれだけ小さいか。損失率がパリティの比率を超えると急に効かなくなる（崖のような振る舞い）
+- 同じ送信量の増え方で、PRS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
+- frame 損失では D+DZ と同じ agreement になる（効かない）こと
+
+### P フレームのステップ幅 q の固定（D+DZ+QI / D+DZ+QI0.5 / D+DZ+QI2 / D+DZ+QI+PRS / D+DZ+Cmax）
+
+D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 2R/2^b を決め直します（論文どおり）。
+差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形はあまり変わらず、**エントロピー符号化後の送信量は F+Sym とほぼ同じ**になります。
+差分にした効果は、送信量の削減ではなく、量子化誤差が小さくなる（一致率が上がる）形で表れます。
+
+方式の `p_step: intra` を指定すると、P フレームの q を直近の I フレームの q × `p_step_scale` に固定します。
+差分が小さいほどインデックスが 0 付近に集まり、送信量が減ります。差分が ±2^(b−1)·q を超えた要素は飽和（クリップ）します。
+
+- q は毎フレームのパケットヘッダで送っているので、復号器は変わりません
+- PRS で P フレームの代わりに I フレームにしたときは、そのフレームの q に切り替えます
+- `clip: max` は範囲 R を max|x| にします（クリップしない）。q 固定の効果が「P99 クリップをやめたこと」から来ていないかを確かめる比較用です
+- Python からは `TemporalEncoder(..., p_step="intra", p_step_scale=1.0)`、量子化だけなら `quantize(x, bits, mode, step=q)`
+- 結果の列（全ての方式で出る）:
+  - `clip` / `p_step` / `p_step_scale`: 方式の設定
+  - `clamp_rate`: P フレームのインデックスのうち、範囲の端 ±2^(b−1) に張り付いた（飽和した）要素の割合
+  - `p_bytes_per_frame`: P フレーム 1 枚あたりの送信量（パリティ込み）
+  - `max_frame_bytes`: 1 フレームの送信量の最大値（I フレームとのばらつき・ピークを見る用）
+- 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
+
+```bash
+# 2 モデル × 6 ビット数（2/3/4/5/6/8）× 7 方式。ロスあり
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
+python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
+```
+
+Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
+`SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
+手元の Mac（8 コア）では resnet50 の 1 クリップに約 5 分かかったので、1 モデルあたり数時間かかります。
+
+```bash
+mkdir -p runs/slurm
+CONFIG=configs/packet_loss_ucf101_qfixed.yaml SCHEMES= sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+# 終わったらまとめて図にする
+python scripts/merge_results.py runs/packet_loss_ucf101_qfixed_*_2026* -o runs/packet_loss_ucf101_qfixed_merged
+python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_merged
+```
 
 ---
 
