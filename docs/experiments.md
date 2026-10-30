@@ -524,7 +524,7 @@ D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 
 - 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
 
 ```bash
-# 2 モデル × 3 ビット数（2/4/8）× 3 方式（F+Sym / D+DZ / D+DZ+QI）。ロスあり
+# 2 モデル（efficientnet_v2_s / resnet50）× 3 ビット数（2/4/8）× 3 方式（F+Sym / D+DZ / D+DZ+QI）。ロスあり
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```

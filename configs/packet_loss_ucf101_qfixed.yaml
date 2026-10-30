@@ -1,6 +1,6 @@
 # =====================================================================
 # scripts/packet_loss_sweep.py 用の設定: P フレームのステップ幅 q を固定する方式（q 固定）の評価
-#   quick 設定（resnet50 / vgg16, Gilbert-Elliott のロス）を base にして、方式とビット数だけを置き換える。
+#   quick 設定（Gilbert-Elliott のロス）を base にして、モデル（efficientnet_v2_s / resnet50）・方式・ビット数を置き換える。
 #
 #   D+DZ は P フレームごとに差分の範囲 R = P99(|δ|) から q を決め直すので、差分が小さくても送信量はあまり減らない
 #   （q も小さくなり、インデックスの分布の形が変わらないため）。q を I フレームの q に固定すると、差分が小さいほど
@@ -20,6 +20,11 @@
 
 base: packet_loss_ucf101_quick.yaml
 experiment_name: packet_loss_ucf101_qfixed
+
+# quick 設定の resnet50 / vgg16 から vgg16 を efficientnet_v2_s に替える（list は丸ごと置き換わる）
+targets:
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_4}   # S4: 128x14x14
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # L2: 512x28x28
 
 bits: [2, 4, 8]
 
