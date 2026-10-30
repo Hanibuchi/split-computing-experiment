@@ -155,6 +155,18 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
   以前は損失条件ごとに符号化し直していた。結果は以前の版と完全に一致する（`tests/test_temporal.py` で確認している）。
   ResNet50/layer2 相当の特徴で、CPU 側の処理が約 10 倍速くなる
 - 符号化・復号は CPU で行い、GPU は tail だけに使う
+- tail が CPU のとき（`devices.tail=cpu`、または GPU が無くて `auto` が cpu になったとき）は、1 クリップの (方式, ビット数) 1 組を
+  1 タスクとしてワーカープロセスで並列に処理する。ワーカー数は `--workers N` で決める（既定: ジョブに割り当てられたコア数）。
+  各ワーカーは torch を 1 スレッドで動かし、符号化 → 全損失条件の復号 → tail（全損失条件をまとめて 1 回のバッチ）までを行う。
+  パケット分割（`entropy_layout`）は 1 パケットずつの Python ループで、スレッドを増やしても速くならないので、プロセスで並列にする。
+  集計値への足し込みはメインプロセスがクリップの順に行うので、集計・保存・`--resume` は 1 プロセスのときと同じで、
+  同じスレッド数なら結果も一致する（`OMP_NUM_THREADS=1` の 1 プロセス実行とビット単位で一致することを確認している。
+  スレッド数が違うと、tail や特徴 MSE の計算が浮動小数点の最後の桁でずれることはある）。
+  - メモリはワーカー 1 つあたり、(損失条件の数 × 30 フレーム) 分の特徴と tail の中間の値ぶん要る（resnet50/layer2 で約 1GB）。
+    足りなければ `--workers` を減らす
+  - tail が cuda / mps のとき、および `--workers 1` のときは、ワーカーを使わず 1 プロセスで順に処理する
+  - 使ったワーカー数は起動時に表示され、`meta.json` の `workers` に残る
+- PRS で NACK を受けた後のフレームのパケット分割は、量子化インデックスが同じなら損失条件の間で使い回す
 - torch の CPU スレッド数は、ジョブに割り当てられたコア数（`os.sched_getaffinity`）を超えないように自動で調整する
   （torch の既定はマシン全体のコア数なので、割り当てが一部だけだとスレッドが多すぎて遅くなる）。
   使ったスレッド数は起動時に表示され、`meta.json` の `cpu_threads` に残る。手動で決めたいときは `OMP_NUM_THREADS=8 python ...`
@@ -491,7 +503,7 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - 同じ送信量の増え方で、PRS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
 - frame 損失では D+DZ と同じ agreement になる（効かない）こと
 
-### P フレームのステップ幅 q の固定（D+DZ+QI / D+DZ+QI0.5 / D+DZ+QI2 / D+DZ+QI+PRS / D+DZ+Cmax）
+### P フレームのステップ幅 q の固定（D+DZ+QI）
 
 D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 2R/2^b を決め直します（論文どおり）。
 差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形はあまり変わらず、**エントロピー符号化後の送信量は F+Sym とほぼ同じ**になります。
@@ -512,14 +524,15 @@ D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 
 - 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
 
 ```bash
-# 2 モデル × 6 ビット数（2/3/4/5/6/8）× 7 方式。ロスあり
+# 2 モデル × 3 ビット数（2/4/8）× 3 方式（F+Sym / D+DZ / D+DZ+QI）。ロスあり
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```
 
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
 `SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
-手元の Mac（8 コア）では resnet50 の 1 クリップに約 5 分かかったので、1 モデルあたり数時間かかります。
+以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
+今は 3 方式 × 3 ビット数 = 9 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm
