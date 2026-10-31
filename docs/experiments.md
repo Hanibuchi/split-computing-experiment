@@ -220,11 +220,17 @@ GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU �
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
 
+仮想環境は `python3 -m venv` ではなく `scripts/slurm/setup_env.sh`（uv）で作る。ノードごとに OS が違い、`/usr/bin/python3` の
+バージョンも違う（ログインノード harp は 3.10、計算ノード glockenspiel は 3.12 など）。システムの python で作った venv は
+そのバージョン用にパッケージが入るので、別のバージョンのノードでは `No module named 'torch'` で止まる。
+uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで共有）に入れるので、どのノードでも同じ python で動く。
+ジョブの開始時に、仮想環境の python のバージョンが合わないときや torch が無いときは、原因を表示して止まる（`scripts/slurm/activate_venv.sh`）。
+
 1. 準備（最初の 1 回だけ）:
 
    ```bash
-   python3 -m venv .venv && source .venv/bin/activate
-   pip install -e ".[video,analysis]"
+   bash scripts/slurm/setup_env.sh    # uv で python 3.12 と .venv を作り、パッケージを入れる
+   source .venv/bin/activate
    python scripts/slurm/prefetch.py   # 動画 30 本と 4 モデルの学習済み重みを先にダウンロード（ジョブ同士の競合を防ぐ）
    mkdir -p runs/slurm                # ジョブのログの出力先（Slurm は作ってくれない）
    ```

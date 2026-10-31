@@ -19,7 +19,7 @@
 #     SCHEMES  実行する方式の name（空白区切り）。python の --scheme に当たる。既定は空で、設定の schemes を全て実行する
 #     EXTRA    packet_loss_sweep.py にそのまま渡す追加の引数（key=value の上書きなど。空白区切り）
 #     RESUME   途中で止まった実行フォルダ。指定すると --resume で続きから再開する（CONFIG / SCHEMES は無視される）
-#     VENV     有効にする仮想環境（既定 .venv）
+#     VENV     有効にする仮想環境（既定 .venv。scripts/slurm/setup_env.sh で作ったもの）
 #     DRY_RUN  1 にすると実行するコマンドを表示するだけで終わる（スクリプトの確認用）
 #     ALLOW_CPU 1 にすると、GPU が使えないノードでも CPU で実行する（既定では GPU が無ければエラーで止まる）
 #
@@ -74,22 +74,8 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
     exit 0
 fi
 
-# shellcheck disable=SC1091
-source "$VENV/bin/activate"
-nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv || true
-
-# PyTorch から GPU が使えるか確かめる。ドライバの不整合（"Driver/library version mismatch"）などで使えないと、
-# devices: auto は黙って CPU になり、何倍も時間がかかる。そうなる前にエラーで止める
-if ! python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
-    if [[ "${ALLOW_CPU:-0}" == 1 ]]; then
-        echo "警告: $(hostname -s) では GPU が使えません。ALLOW_CPU=1 なので CPU で実行します"
-    else
-        echo "エラー: $(hostname -s) では PyTorch から GPU が使えません（上の nvidia-smi の出力を確認）。" >&2
-        echo "  このノードを外して投げ直してください: sbatch --exclude=$(hostname -s) ... scripts/slurm/packet_loss.sbatch" >&2
-        echo "  CPU で実行してよい場合は ALLOW_CPU=1 を付けて投げてください" >&2
-        exit 1
-    fi
-fi
+# 仮想環境を有効にし、torch と GPU が使えるかを確かめる（だめなら原因を表示して止まる）
+source scripts/slurm/activate_venv.sh "$VENV" scripts/slurm/packet_loss.sbatch
 
 "${cmd[@]}"
 echo "=== $(date '+%F %T') 終了"
