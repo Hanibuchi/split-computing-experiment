@@ -258,17 +258,18 @@ uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで
    結果は `runs/packet_loss_ucf101_<ジョブID>/<モデル名>/` に入る（設定ファイルが `configs/packet_loss_ucf101_qfixed.yaml` なら
    `runs/packet_loss_ucf101_qfixed_<ジョブID>/`）。モデルごとに別のフォルダに書くので、ジョブ同士で書き込みがぶつからない
 
-   ノードの GPU が PyTorch から使えないと、CPU で黙って何倍も時間をかけないように、ジョブは計算を始める前にエラーで止まる
-   （`.err` に `エラー: <ノード名> では PyTorch から GPU が使えません`）。
+   ノードの GPU が PyTorch から使えないときは、止まらずに **CPU で続ける**（`.out` に `警告: <ノード名> では GPU が使えません。ALLOW_CPU=1 なので CPU で実行します`）。
    例えば NVIDIA ドライバの更新後にノードを再起動していない場合は、`nvidia-smi` が `Driver/library version mismatch` になってこうなる
-   （管理者に再起動を頼む）。それまでは、そのノードを外して投げる。各ノードで GPU が使えるかは `srun` で確かめられる:
+   （管理者に再起動を頼む）。CPU では tail も CPU になり、`-c` のコア数（12）のワーカープロセスで並列に処理するが、GPU より遅い。
+   2 日の制限で切れたら、下の 4 の方法で続きから再開できる。
+   GPU のノードだけで動かしたいときは、そのノードを外して投げるか、`ALLOW_CPU=0` で GPU が無ければエラーで止まるようにする。
+   各ノードで GPU が使えるかは `srun` で確かめられる:
 
    ```bash
    srun -p GPU -w <ノード名> nvidia-smi                         # GPU の一覧が出れば使える
    sbatch --exclude=<ノード名> scripts/slurm/packet_loss.sbatch   # 複数外すときは --exclude=<ノード名1>,<ノード名2>
+   ALLOW_CPU=0 sbatch scripts/slurm/packet_loss.sbatch           # GPU が使えないノードではエラーで止める
    ```
-
-   CPU で実行してよいときは `ALLOW_CPU=1 sbatch ...` とする
 
 4. 2 日の制限で切れた（`.err` に `DUE TO TIME LIMIT`）り、ノードの不調で失敗したりしたら、同じフォルダを `OUT=` で指定して、同じ番号で投げ直す:
 

@@ -29,7 +29,8 @@
 #              （CONFIG / SCHEMES / OUT は無視され、まとめ用のジョブも投げない）
 #     VENV     有効にする仮想環境（既定 .venv。scripts/slurm/setup_env.sh で作ったもの）
 #     DRY_RUN  1 にすると実行するコマンドを表示するだけで終わる（スクリプトの確認用）
-#     ALLOW_CPU 1 にすると、GPU が使えないノードでも CPU で実行する（既定では GPU が無ければエラーで止まる）
+#     ALLOW_CPU GPU が使えないノード（ドライバの不整合など）に当たったときの動き。既定 1: 警告を出して CPU で続ける
+#              （tail も CPU になり、-c のコア数のワーカープロセスで並列に処理する。GPU より遅い）。0: エラーで止まる
 #
 #   targets の番号は python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets で確認できる。
 # =====================================================================
@@ -59,6 +60,8 @@ TASK="${SLURM_ARRAY_TASK_ID:-0}"
 ARRAY_JOB="${SLURM_ARRAY_JOB_ID:-local}"
 OUT="${OUT:-runs/$(basename "$CONFIG" .yaml)_${ARRAY_JOB}}"
 NO_MERGE="${NO_MERGE:-0}"
+# GPU が使えないノードに当たっても止めずに CPU で続ける（activate_venv.sh が見る）。止めたいときは ALLOW_CPU=0
+export ALLOW_CPU="${ALLOW_CPU:-1}"
 
 # 空白で区切って配列にする。set -f で seeds=[0] などがファイル名として展開されないようにする
 set -f
