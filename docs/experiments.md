@@ -214,16 +214,23 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 ### 研究室の Slurm クラスタで動かす
 
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
-GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は既定で F+Sym / D+Sym / D+DZ / D+DZ+S2 / D+DZ+S5 / D+DZ+PRS / D+DZ+PRS3 / D+DZ+FEC10 / D+DZ+FEC25
-（D+DZ+R を入れるときは `SCHEMES=` と空にするか、`SCHEMES="... D+DZ+R"` とする）。
+GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は、python で直接実行するときと同じく設定の `schemes` が全て実行される。絞るときは `SCHEMES="F+Sym D+DZ"` のように名前を並べる（`--scheme` に当たる）。
+本番の設定の D+DZ+R はロス補修 net（`checkpoints/restorer_resnet50_layer2.pt`）が要るので、まだ学習していないときは
+`SCHEMES="F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3 D+DZ+FEC10 D+DZ+FEC25"` と D+DZ+R を除いて投げる（除かないと開始直後にエラーで止まる）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
+
+仮想環境は `python3 -m venv` ではなく `scripts/slurm/setup_env.sh`（uv）で作る。ノードごとに OS が違い、`/usr/bin/python3` の
+バージョンも違う（ログインノード harp は 3.10、計算ノード glockenspiel は 3.12 など）。システムの python で作った venv は
+そのバージョン用にパッケージが入るので、別のバージョンのノードでは `No module named 'torch'` で止まる。
+uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで共有）に入れるので、どのノードでも同じ python で動く。
+ジョブの開始時に、仮想環境の python のバージョンが合わないときや torch が無いときは、原因を表示して止まる（`scripts/slurm/activate_venv.sh`）。
 
 1. 準備（最初の 1 回だけ）:
 
    ```bash
-   python3 -m venv .venv && source .venv/bin/activate
-   pip install -e ".[video,analysis]"
+   bash scripts/slurm/setup_env.sh    # uv で python 3.12 と .venv を作り、パッケージを入れる
+   source .venv/bin/activate
    python scripts/slurm/prefetch.py   # 動画 30 本と 4 モデルの学習済み重みを先にダウンロード（ジョブ同士の競合を防ぐ）
    mkdir -p runs/slurm                # ジョブのログの出力先（Slurm は作ってくれない）
    ```
@@ -524,19 +531,18 @@ D+DZ は P フレームごとに、差分 δ の範囲 R = P99(|δ|) から q = 
 - 図: `clamp_rate.png`（ビット数 → 飽和率）。送信量と一致率の関係は `rate_vs_agreement.png`
 
 ```bash
-# 2 モデル × 3 ビット数（2/4/8）× 3 方式（F+Sym / D+DZ / D+DZ+QI）。ロスあり
+# 2 モデル（efficientnet_v2_s / resnet50）× 3 ビット数（2/4/8）× 4 方式（F+Sym / D+DZ / D+DZ+Cmax / D+DZ+QI）。ロスあり
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```
 
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 2 つなので `--array=0-1`）。
-`SCHEMES=` と空にして、設定の全方式を実行させます（既定の `SCHEMES` には q 固定の方式が入っていないため）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
-今は 3 方式 × 3 ビット数 = 9 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
+今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm
-CONFIG=configs/packet_loss_ucf101_qfixed.yaml SCHEMES= sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
 # 終わったらまとめて図にする
 python scripts/merge_results.py runs/packet_loss_ucf101_qfixed_*_2026* -o runs/packet_loss_ucf101_qfixed_merged
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_merged
