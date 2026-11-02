@@ -8,7 +8,7 @@
 #   リポジトリのトップで投げる（ログの出力先 runs/slurm/ は先に作っておく。Slurm は作ってくれない）:
 #     mkdir -p runs/slurm
 #     sbatch scripts/slurm/packet_loss.sbatch                     # 全 4 モデル（配列 0-3）
-#     CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch   # 別の設定（target 2 つ）
+#     CONFIG=configs/packet_loss_ucf101_quick.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch   # 別の設定（target 2 つ）
 #     SCHEMES="F+Sym D+DZ" sbatch scripts/slurm/packet_loss.sbatch  # 方式を絞る
 #     sbatch --array=1 scripts/slurm/packet_loss.sbatch           # target 1 番（resnet50）だけ
 #     EXTRA="data.kwargs.num_clips=2 seeds=[0]" sbatch --array=1 scripts/slurm/packet_loss.sbatch   # 動作確認
