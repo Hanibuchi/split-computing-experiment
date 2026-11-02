@@ -30,7 +30,8 @@ PRS でフィードバックによって符号化し直したフレームのパ�
 tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 のときは、ワーカーを使わず 1 プロセスで順に処理する。
 メインプロセスの torch の CPU スレッド数（head の計算用）は、ジョブに割り当てられたコア数を超えないように調整する。
 
-出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/）:
+出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/。
+--group-dir DIR を指定した場合は DIR/<モデル名>/（--target なしなら DIR/all/）。Slurm の配列ジョブで全モデルを 1 つのフォルダにまとめる用）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
                    送信量（packets_per_frame, bytes_per_frame）は、量子化インデックスをパケットごとに独立した
                    適応算術符号で符号化したときの値（splitcomp.temporal.packet.entropy_layout）
@@ -64,6 +65,10 @@ tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 の�
 
     # 途中で止まった実行を再開する
     python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20261013-120000
+
+    # 全モデルの結果を 1 つのフォルダ（runs/my_group/<モデル名>/）に入れる。同じコマンドをもう一度実行すると続きから再開する
+    # （Slurm の scripts/slurm/packet_loss.sbatch はこれを使う。まとめは python scripts/merge_results.py --group runs/my_group）
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50 --group-dir runs/my_group
 
     # ワーカー数を指定する（1 にするとワーカーを使わず 1 プロセスで動かす）
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --workers 16
@@ -499,6 +504,17 @@ def target_name(target) -> str:
     return f"{target.model.name}/{target.split_point}"
 
 
+def group_member_dir(group_dir: Path, targets: list, selected: bool) -> Path:
+    """--group-dir のときの実行フォルダ: group_dir/<モデル名>（--target で絞っていなければ group_dir/all）。
+
+    Slurm の配列ジョブでは、各ジョブがモデル 1 つずつを同じ group_dir の下の別々のフォルダに書く。
+    ファイルを共有しないので、ジョブ同士で書き込みがぶつからない。
+    """
+    if not selected:
+        return Path(group_dir) / "all"
+    return Path(group_dir) / "+".join(dict.fromkeys(t.model.name for t in targets))
+
+
 def select_targets(targets: list, names: list[str] | None) -> list:
     """names（モデル名・「モデル名/分割点」・0 始まりの番号）に一致する target を、設定ファイルの順で返す。
 
@@ -638,6 +654,13 @@ def main() -> None:
         p.add_argument("--list-targets", action="store_true", help="設定にある target を番号付きで表示して終了する")
         p.add_argument("--resume", type=Path, metavar="RUN_DIR", help="途中で止まった実行フォルダの続きから再開する（設定はそのフォルダの config.yaml を使う）")
         p.add_argument(
+            "--group-dir",
+            type=Path,
+            metavar="DIR",
+            help="実行フォルダを DIR/<モデル名>（--target なしなら DIR/all）にする。Slurm の配列ジョブで全モデルの結果を 1 つのフォルダに"
+            "まとめるため。そのフォルダが既にあれば、続きから再開する（設定はそのフォルダの config.yaml を使う）",
+        )
+        p.add_argument(
             "--workers",
             type=int,
             default=None,
@@ -657,6 +680,22 @@ def main() -> None:
     if not args.resume:
         cfg.targets = select_targets(cfg.targets, args.target)
         cfg.schemes = select_schemes(cfg.schemes, args.scheme)
+    group_run_dir = None
+    if args.group_dir and not args.resume:
+        group_run_dir = group_member_dir(args.group_dir, cfg.targets, bool(args.target))
+        if (group_run_dir / "config.yaml").exists():
+            # 同じ配列ジョブのフォルダに投げ直した（時間切れ・失敗したモデルのやり直し）: 続きから再開する
+            # 投げ直すときに前と同じ EXTRA（key=value の上書き）を付けても止まらないように、devices.* 以外の上書きは無視する
+            ignored = [o for o in args.overrides if not o.startswith("devices.")]
+            print(
+                f"{group_run_dir} は既にあるので、続きから再開します（設定はそのフォルダの config.yaml を使い、--config / --scheme"
+                + (f" と上書き {ignored}" if ignored else "")
+                + " は無視します）"
+            )
+            args.resume = group_run_dir
+            args.overrides = [o for o in args.overrides if o.startswith("devices.")]
+            cfg = resume_config(args.resume, args.overrides)
+            group_run_dir = None
     for s in cfg.schemes:
         if s.prs and (s.scheme == "fd" or s.feedback_delay < 1):
             raise SystemExit(f"方式 {s.name}: prs は fd 以外で、feedback_delay は 1 以上にしてください")
@@ -689,11 +728,15 @@ def main() -> None:
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"再開します: {run_dir}（終わっている target: {', '.join(sorted(done)) or 'なし'}）")
     else:
-        # 一部の target だけを実行する場合は、どのモデルの結果か分かるようにフォルダ名に入れる
-        name = cfg.experiment_name
-        if args.target:
-            name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
-        run_dir = make_run_dir(cfg.output_dir, name)
+        if group_run_dir is not None:
+            run_dir = group_run_dir
+            run_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            # 一部の target だけを実行する場合は、どのモデルの結果か分かるようにフォルダ名に入れる
+            name = cfg.experiment_name
+            if args.target:
+                name += "_" + "+".join(dict.fromkeys(t.model.name for t in cfg.targets))
+            run_dir = make_run_dir(cfg.output_dir, name)
         save_run_info(
             run_dir, to_dict(cfg), {"head_device": str(head_dev), "tail_device": str(tail_dev), "cpu_threads": threads, "workers": workers}
         )
