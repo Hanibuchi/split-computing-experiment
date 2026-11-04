@@ -198,9 +198,13 @@ class TemporalSchemeConfig:
     #: 量子化の範囲 R の決め方 "p99"（|x| の P99。範囲外はクリップ）/ "max"（|x| の最大値。クリップしない）。I/P 共通。
     #: p_step="intra" の P フレームでは使わない（q を I フレームから決めるため）。
     clip: str = "p99"
-    #: P フレームのステップ幅 q の決め方。"adaptive": 毎フレーム差分の範囲から決め直す（論文どおり）/
+    #: P フレームのステップ幅 q の決め方（既定は "intra"）。
     #: "intra": 直近の I フレームの q × p_step_scale に固定する（差分が小さいほど送信量が減る。例: D+DZ+QI）。
-    p_step: str = "adaptive"
+    #: "adaptive": 毎フレーム差分の範囲から決め直す。
+    #: 論文（Shiba et al.）は、圧縮率の評価では q を固定（= intra）、精度の評価ではフレームごとに決め直して（= adaptive）
+    #: いたらしい（著者に確認）。圧縮率と精度を同じ設定で出せるように intra を既定にしている。
+    #: 論文の精度の数字と比べるときは p_step: adaptive を明示する。
+    p_step: str = "intra"
     #: p_step="intra" のときの倍率（大きいほど P フレームが粗くなり、送信量が減る）。
     p_step_scale: float = 1.0
 

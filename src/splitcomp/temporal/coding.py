@@ -30,13 +30,14 @@ PRS（Reference Picture Selection, prs=True）:
     とする。ロスがなければ prs=False と全く同じ符号化になる。参照先はパケットヘッダの「種類」u8 の残り 7 ビットに
     t − ref として入れる（GoP ≤ 128 なら足りる）ので、ヘッダは増えない。
 
-P フレームのステップ幅（p_step）:
-    adaptive : P フレームごとに、送る差分の範囲 R（既定は |δ| の P99）から q = 2R/2^b を決め直す（論文どおり）。
+P フレームのステップ幅（p_step。既定は intra）:
+    adaptive : P フレームごとに、送る差分の範囲 R（既定は |δ| の P99）から q = 2R/2^b を決め直す（論文の精度評価の設定）。
                差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形（= エントロピー・送信量）は
                I フレームとあまり変わらない。差分にした効果は量子化誤差が小さくなる形で表れる
     intra    : P フレームの q を、直近の I フレームの q × p_step_scale に固定する。差分が小さいほどインデックスが 0 付近に集まり、
                送信量が減る。差分が ±2^(b−1)·q を超えた要素はクリップ（飽和）される。PRS で P フレームの代わりに I フレームにしたときは、
-               そのフレームの q に切り替える。q は毎フレームのパケットのヘッダで送っているので、復号器は変わらない
+               そのフレームの q に切り替える。q は毎フレームのパケットのヘッダで送っているので、復号器は変わらない。
+               論文の圧縮率評価の設定（著者に確認）。圧縮率と精度を同じ設定で出せるので既定にしている
 
 パケットロスの扱い:
     端末（:class:`TemporalEncoder`）はロスを知らない（フィードバックなし）。そのため DPCM でロスが起きると
@@ -96,7 +97,7 @@ class TemporalEncoder:
         streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
         full_range: True なら量子化の値を [−R, R] に収める（インデックスは ±2^(b−1) で b ビットに収まらない。論文の再現用）。
         prs: True ならクラウドからの NACK（:meth:`nack`）を受けて、クラウド側で壊れていないフレームを参照する（PRS）。fd では使えない。
-        p_step: P フレームのステップ幅の決め方 "adaptive"（毎フレーム決め直す）/ "intra"（直近の I フレームの q に固定）。
+        p_step: P フレームのステップ幅の決め方 "intra"（直近の I フレームの q に固定。既定）/ "adaptive"（毎フレーム決め直す）。
         p_step_scale: p_step="intra" のときの倍率（P フレームの q = I フレームの q × p_step_scale）。
     """
 
@@ -111,7 +112,7 @@ class TemporalEncoder:
         streams: int = 1,
         full_range: bool = False,
         prs: bool = False,
-        p_step: str = "adaptive",
+        p_step: str = "intra",
         p_step_scale: float = 1.0,
     ):
         if scheme not in SCHEMES:
