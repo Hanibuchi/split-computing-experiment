@@ -118,7 +118,10 @@ def reconstruct(feats: torch.Tensor, scheme: str, bits: int, mode: str, clip: st
     recon = torch.empty_like(feats)
     coded = []
     if scheme in ("dwd", "dpcm") or (scheme == "fd" and mode == "sym"):
-        enc = TemporalEncoder(scheme, bits, gop, p_quant=mode, clip=clip, theta=theta, full_range=True)
+        # 論文の精度の数字と比べるので、P フレームの q は毎フレーム決め直す（論文の精度評価の設定）
+        enc = TemporalEncoder(
+            scheme, bits, gop, p_quant=mode, clip=clip, theta=theta, full_range=True, p_step="adaptive"
+        )
         dec = TemporalDecoder()
         for t in range(T):
             frame = enc.encode(feats[t])

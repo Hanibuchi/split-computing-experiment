@@ -882,8 +882,9 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "feedback_delay": sc.feedback_delay if sc.prs else None,  # NACK が届くまでのフレーム数
                 "fec_rate": sc.fec,  # FEC のパリティの比率 r（0 = FEC なし）
                 "clip": sc.clip,  # 量子化の範囲 R の決め方（p99 / max）
-                "p_step": sc.p_step,  # P フレームの q の決め方（adaptive / intra）
-                "p_step_scale": sc.p_step_scale if sc.p_step == "intra" else None,  # intra の倍率
+                # P フレームの q の決め方（adaptive / intra）。fd は P フレームが無いので空欄
+                "p_step": sc.p_step if sc.scheme != "fd" else None,
+                "p_step_scale": sc.p_step_scale if sc.p_step == "intra" and sc.scheme != "fd" else None,  # intra の倍率
                 "coding": "adaptive_ac",  # パケットの符号化（packet_loss_plot.py が古い固定長の結果と見分ける用）
                 "gop": cfg.gop,
                 "loss": loss,

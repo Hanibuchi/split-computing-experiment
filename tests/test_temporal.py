@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from splitcomp.compression.codecs import pack_bits
-from splitcomp.config import DataConfig, LossConfig
+from splitcomp.config import DataConfig, LossConfig, TemporalSchemeConfig
 from splitcomp.data import build_dataloader, build_dataset
 from splitcomp.temporal import (
     AC_HEADER_BYTES,
@@ -219,11 +219,14 @@ def test_multi_stream_iframe_loss_affects_whole_gop():
 
 
 def test_multi_stream_widens_quantization_step():
-    """参照が時間的に遠くなるので差分が大きくなり、同じビット数では量子化ステップ q（＝量子化誤差）が大きくなる。"""
+    """参照が時間的に遠くなるので差分が大きくなり、同じビット数では量子化ステップ q（＝量子化誤差）が大きくなる。
+
+    q を毎フレーム差分から決め直す p_step="adaptive" のときの性質（既定の intra では q は I フレームと同じ）。
+    """
     feats = _video(T=30, rho=0.95)
 
     def mean_step(streams):
-        enc = TemporalEncoder("dpcm", 4, 30, "dz", streams=streams)
+        enc = TemporalEncoder("dpcm", 4, 30, "dz", streams=streams, p_step="adaptive")
         return np.mean([enc.encode(f).q for f in feats][5:])
 
     assert mean_step(1) < mean_step(2) < mean_step(5)
@@ -364,14 +367,16 @@ def test_intra_step_reduces_entropy_of_small_residuals():
     assert max(ent["intra"][1:]) < min(ent["adaptive"][1:])
 
 
-def test_adaptive_step_is_default():
-    """p_step の既定（adaptive）は、指定しないときと全く同じ符号化になる。"""
+def test_intra_step_is_default():
+    """p_step の既定は intra（倍率 1）で、指定しないときと全く同じ符号化になる。方式の設定の既定も intra。"""
     feats = _video(T=8)
     a = TemporalEncoder("dpcm", 4, 30, "dz")
-    b = TemporalEncoder("dpcm", 4, 30, "dz", p_step="adaptive", p_step_scale=3.0)
+    b = TemporalEncoder("dpcm", 4, 30, "dz", p_step="intra", p_step_scale=1.0)
     for f in feats:
         fa, fb = a.encode(f), b.encode(f)
         assert fa.q == fb.q and torch.equal(fa.idx, fb.idx)
+    sc = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    assert sc.p_step == "intra" and sc.p_step_scale == 1.0
 
 
 def test_intra_step_follows_forced_intra():
@@ -400,10 +405,10 @@ def test_sweep_encoding_key_distinguishes_step_settings():
     from splitcomp.config import TemporalSchemeConfig
 
     sweep = _load_script("packet_loss_sweep")
-    base = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
+    base = TemporalSchemeConfig("D+DZ", "dpcm", "dz", p_step="adaptive")
     key = sweep.encoding_key(base, 4)
-    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True), 4) == key
-    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+FEC10", "dpcm", "dz", fec=0.1), 4) == key
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, p_step="adaptive"), 4) == key
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+FEC10", "dpcm", "dz", fec=0.1, p_step="adaptive"), 4) == key
     others = [
         TemporalSchemeConfig("D+DZ+Cmax", "dpcm", "dz", clip="max"),
         TemporalSchemeConfig("D+DZ+QI", "dpcm", "dz", p_step="intra"),

@@ -67,7 +67,7 @@ def simulate(feats: torch.Tensor, cfg: RestorerTrainConfig, bits: int, loss_cfg,
             ref: 全フレームの ||ロスなしの復元特徴||² の和（err を相対誤差にする用）。
     """
     loss = build_loss_model(loss_cfg, seed)
-    enc = TemporalEncoder("dpcm", bits, cfg.gop, "dz")
+    enc = TemporalEncoder("dpcm", bits, cfg.gop, "dz")  # P フレームの q は既定（intra = I フレームの q に固定）
 
     record: list[tuple] = []
 
