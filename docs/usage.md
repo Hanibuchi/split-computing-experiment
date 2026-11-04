@@ -233,7 +233,7 @@ head / tail は固定で、tail・ラベルは使いません。全てのチャ�
 | 項目 | 意味 |
 |---|---|
 | `targets` | 学習に使う (モデル, 分割点)。複数書くと混ぜて学習する |
-| `data` | 学習用の動画。ucf101 の `selection: random` に `groups: "8-25"`（評価用の g01 と重ならない）と `clips_per_class` |
+| `data` | 学習用の動画。ucf101 の `selection: random` に `groups: "8-25"`（評価用の `PAPER_CLIPS` は自動で除く）と `clips_per_class` |
 | `val_clips` | `data` の末尾から検証に回す本数 |
 | `bits`, `gop`, `mtu`, `interleave` | 符号化の条件（評価の設定と合わせる）。bits は系列ごとにランダムに選ぶ |
 | `losses` | 学習時に起こす損失（系列ごとにランダムに 1 つ選ぶ） |

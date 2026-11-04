@@ -580,17 +580,60 @@ def test_ucf101_frame_folders(tmp_path):
 
 
 def test_paper_clips_selection():
-    from collections import Counter
-
     from splitcomp.data.ucf101 import PAPER_CLIPS, UCF101_CLASSES, class_of
 
     assert len(UCF101_CLASSES) == 101
-    classes = [class_of(v) for _, v in PAPER_CLIPS]
-    assert len(set(classes)) == 30 and all(c in UCF101_CLASSES for c in classes)
-    assert {"Typing", "Basketball"} <= set(classes)
-    counts = Counter(cat for cat, _ in PAPER_CLIPS)
-    assert counts == {"human_object": 6, "body_motion": 5, "human_human": 1, "instruments": 3, "sports": 15}
-    assert len({cat for cat, _ in PAPER_CLIPS[:5]}) == 5  # 先頭 5 本で全カテゴリが揃う
+    assert len(PAPER_CLIPS) == 30 and len({v for v, _, _ in PAPER_CLIPS}) == 30
+    assert all(class_of(v) in UCF101_CLASSES for v, _, _ in PAPER_CLIPS)
+    # 著者の表の終了フレーム（開始 + 29）は全て動画の中にある
+    assert all(0 <= start and start + 30 <= total for _, start, total in PAPER_CLIPS)
+    # 15fps（frame_step=2）で開始フレームから 60 フレーム取れないのは、この 5 本だけ
+    short = {v for v, start, total in PAPER_CLIPS if start + 60 > total}
+    assert short == {"v_Shotput_g12_c06", "v_BabyCrawling_g02_c02", "v_TennisSwing_g18_c02", "v_Lunges_g15_c02", "v_CuttingInKitchen_g02_c03"}
+
+
+def _frame_dir(d, n: int):
+    """フレーム i の画素値が全て i * 10 のフレーム画像ディレクトリを作る（PNG なので値は劣化しない）。"""
+    from PIL import Image
+
+    d.mkdir(parents=True)
+    for i in range(n):
+        Image.fromarray(np.full((8, 8, 3), i * 10, dtype=np.uint8)).save(d / f"{i:04d}.png")
+
+
+def test_read_frames_start_and_total_check(tmp_path):
+    import warnings
+
+    from splitcomp.data.ucf101 import _read_frames
+
+    _frame_dir(tmp_path / "v", 10)
+    x = _read_frames(tmp_path / "v", 3, start=4)
+    assert x.shape == (3, 8, 8, 3) and x[:, 0, 0, 0].tolist() == [40, 50, 60]
+    assert len(_read_frames(tmp_path / "v", 5, start=8)) == 2  # 末尾を超える分は返さない
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _read_frames(tmp_path / "v", 3, start=4, expected_total=10)  # 一致すれば警告なし
+    with pytest.warns(UserWarning, match="総フレーム数"):
+        _read_frames(tmp_path / "v", 3, start=4, expected_total=11)
+
+
+def test_paper_selection_start_frame_and_exclusion(tmp_path, monkeypatch):
+    """paper は PAPER_CLIPS の開始フレームから読み、frame_step 倍のフレームが取れない動画は除外する。"""
+    from splitcomp.data import ucf101
+
+    clips = [("v_Typing_g01_c01", 2, 8), ("v_Basketball_g01_c01", 5, 8)]
+    monkeypatch.setattr(ucf101, "PAPER_CLIPS", clips)
+    for v, _, total in clips:
+        _frame_dir(tmp_path / "UCF-101" / ucf101.class_of(v) / v, total)
+    ds = ucf101.UCF101Clips(str(tmp_path), clip_len=3, size=8, download=False)
+    assert len(ds) == 2
+    raw = ds._load_u8(0)  # (T, 3, H, W) uint8。開始フレーム 2 から
+    assert raw[:, 0, 0, 0].tolist() == [20, 30, 40]
+    assert ds._load_u8(1)[:, 0, 0, 0].tolist() == [50, 60, 70]
+    ds2 = ucf101.UCF101Clips(str(tmp_path), clip_len=3, frame_step=2, size=8, download=False)
+    # Basketball は 5 から 6 フレーム取れない（8 本しかない）ので除外。Typing は 2, 4, 6
+    assert [ds2.clip_name(i) for i in range(len(ds2))] == ["v_Typing_g01_c01"]
+    assert ds2._load_u8(0)[:, 0, 0, 0].tolist() == [20, 40, 60]
 
 
 class _RangeHandler(SimpleHTTPRequestHandler):

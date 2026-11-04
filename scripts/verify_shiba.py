@@ -21,7 +21,8 @@ DnD（クラウドが真の f_{t−1} を持つ理想化）と F+DZ は Temporal
     report/fig*.png             論文の Fig. 4–11 と同じ形の図（論文の値は白抜きの記号で重ねる）
 
 判定: ✓ 許容幅以内 / △ 許容幅の 2 倍以内 / ✗ それ以上（許容幅は TOL）。
-論文のクリップのリストは公開されておらず PAPER_CLIPS は推測なので、数値の完全な一致は期待できない。
+クリップは論文の著者から提供された 30 本と開始フレーム（PAPER_CLIPS）。15fps（Fig. 4）は開始フレームから 60 フレーム
+取れない 5 本を除いた 25 本で計算する。
 
 例:
     python scripts/verify_shiba.py                                   # 本番（12 条件 × 30 クリップ。数時間）
@@ -200,6 +201,8 @@ def run_target(target: tuple, args, head_dev, tail_dev, ds30, ds15) -> dict:
                              Z_I=0.0, Z_P=0.0, zeros_I=0, zeros_P=0, elems_I=0, elems_P=0, alpha_num=0.0, alpha_den=0.0) for c in conds}
     gop_acc = {K: {"H": 0.0, "n": 0} for K in GOP_LENGTHS}
     stats30, stats15 = [], []
+    # 15fps のデータセットは足りない動画を除外しているので、番号ではなく動画名で対応させる
+    idx15 = {ds15.clip_name(i): i for i in range(len(ds15))} if ds15 is not None else {}
     started = time.perf_counter()
 
     for clip in range(len(ds30)):
@@ -208,8 +211,9 @@ def run_target(target: tuple, args, head_dev, tail_dev, ds30, ds15) -> dict:
         (feats,) = head(x.to(head_dev))
         feats = feats.float().cpu()
         stats30.append(frame_stats(feats))
-        if ds15 is not None:
-            (f15,) = head(ds15[clip][0].to(head_dev))
+        j = idx15.get(ds30.clip_name(clip))
+        if j is not None:
+            (f15,) = head(ds15[j][0].to(head_dev))
             stats15.append(frame_stats(f15.float().cpu()))
         if tuple(feats.shape[1:]) != pv.TABLE3_SHAPE[(model_name, sp)]:
             raise ValueError(f"{model_name}/{sp} の特徴の形 {tuple(feats.shape[1:])} が論文の Table 3 と違います")
@@ -263,6 +267,7 @@ def run_target(target: tuple, args, head_dev, tail_dev, ds30, ds15) -> dict:
         "split_point": sp,
         "shape": list(feats.shape[1:]),
         "num_clips": len(ds30),
+        "num_clips_15": len(stats15),
         "quick": args.quick,
         "stats30": stats30,
         "stats15": stats15,
@@ -330,7 +335,8 @@ def load_raw(run_dir: Path):
     for path in sorted((run_dir / "raw").glob("*.json")):
         r = json.loads(path.read_text(encoding="utf-8"))
         key = (r["model"], r["split_point"])
-        base = {"model": r["model"], "split_point": r["split_point"], "label": pv.LABEL[key], "num_clips": r["num_clips"]}
+        base = {"model": r["model"], "split_point": r["split_point"], "label": pv.LABEL[key], "num_clips": r["num_clips"],
+                "num_clips_15": r.get("num_clips_15", len(r["stats15"]))}
         s = _summarize_stats(r["stats30"])
         if r["stats15"]:
             s15 = _summarize_stats(r["stats15"])
@@ -943,15 +949,17 @@ def write_report(run_dir: Path, packet_loss_run: Path | None) -> None:
     plot_table_scatter(cmp_df, out)
 
     n_clips = sorted(stats.num_clips.unique().tolist())
+    n_clips15 = sorted(stats.num_clips_15.unique().tolist())
     lines = [
         "# Shiba et al. (IEEE Access 2026) の再現検証",
         "",
         f"- 実行フォルダ: `{run_dir}`",
-        f"- 条件: {len(stats)}/12 の (モデル, 分割点)、クリップ数 {n_clips}（論文は 30 本 × 30 フレーム）",
+        f"- 条件: {len(stats)}/12 の (モデル, 分割点)、クリップ数 {n_clips}（論文は 30 本 × 30 フレーム）、15fps のクリップ数 {n_clips15}",
         f"- 判定: ✓ 許容幅以内 / △ 許容幅の 2 倍以内 / ✗ それ以上。許容幅: "
         + ", ".join(f"{k} {'±' + format(w, 'g') if kind == 'abs' else '±' + format(w * 100, 'g') + '%'}" for k, (kind, w) in TOL.items()),
-        "- 注意: 論文の 30 クリップのリストは公開されておらず、`PAPER_CLIPS`（src/splitcomp/data/ucf101.py）は推測。"
-        "そのため数値の完全な一致は期待できない。大小関係・傾向（本文の主張）が再現できているかを重視する",
+        "- クリップ: 論文の著者から提供された 30 本と開始フレーム（`PAPER_CLIPS`、src/splitcomp/data/ucf101.py）。"
+        "15fps は開始フレームから 60 フレーム取れない 5 本を除く。デコーダや実装の細部の違いは残るので、"
+        "大小関係・傾向（本文の主張）が再現できているかも合わせて見る",
         "",
         "## 判定のまとめ",
         "",

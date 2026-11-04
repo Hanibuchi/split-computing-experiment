@@ -16,7 +16,7 @@ seed: 0
 targets:
   - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}   # L2: 512x28x28
 
-# 評価用の 30 本（グループ g01）と重ならないよう、公式 split 1 の train 側（g08–g25）から選ぶ
+# 公式 split 1 の train 側（g08–g25）から選ぶ。評価用の 30 本（PAPER_CLIPS）は自動で除くので重ならない
 data:
   name: ucf101
   root: ./data

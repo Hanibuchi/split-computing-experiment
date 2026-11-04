@@ -20,14 +20,14 @@ targets:
 
 data:
   name: ucf101
-  root: ./data            # 使う動画は初回実行時に ./data/UCF-101/<クラス名>/ へ自動でダウンロードされる（30 本・約 15MB）
+  root: ./data            # 使う動画は初回実行時に ./data/UCF-101/<クラス名>/ へ自動でダウンロードされる（30 本・約 14MB）
   split: test             # （ucf101 では未使用）
   num_samples: null
   kwargs:
-    selection: paper      # paper: 論文相当の 30 本（src/splitcomp/data/ucf101.py の PAPER_CLIPS）/ random: seed で選ぶ
+    selection: paper      # paper: 論文と同じ 30 本・開始フレーム（著者提供。src/splitcomp/data/ucf101.py の PAPER_CLIPS）/ random: seed で選ぶ
     num_clips: null       # null で 30 本全て。2 などにすると先頭 N 本だけ（動作確認用）
     clip_len: 30          # 30 フレーム = GoP 1 個分
-    frame_step: 1         # 2 にすると時間間隔 2 倍（論文の 15fps 実験）
+    frame_step: 1         # 2 にすると時間間隔 2 倍（論文の 15fps 実験。60 フレーム取れない 5 本は除外され 25 本になる）
     size: 224
     download: true        # 手元に無い動画を HuggingFace のミラーから取得する
 

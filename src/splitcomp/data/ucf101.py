@@ -11,19 +11,26 @@ UCF-101 は 101 種類の動作（クラス）の動画データセットで、�
 （:mod:`.download`。7GB 全体は落とさない）。
 
 クリップの選び方（``selection``）:
-    "paper"  : :data:`PAPER_CLIPS` の 30 本（既定）。Shiba et al. (IEEE Access 2026) §V-B と同じ条件を狙ったもの
+    "paper"  : :data:`PAPER_CLIPS` の 30 本（既定）。Shiba et al. (IEEE Access 2026) の著者から提供された、
+               論文の実験と同じ動画と開始フレーム。clip_len × frame_step フレームに足りない動画は除外する
     "random" : seed で num_clips クラスを選び、各クラスから動画を clips_per_class 本ずつ選ぶ。
                groups で撮影グループを絞れる（例: "8-25" = 公式 split 1 の train 側。評価用の g01 と重ならない）
-               clip_len に満たない動画（UCF-101 にまれにある）は読み込み時に除外する
+               clip_len に満たない動画（UCF-101 にまれにある）は読み込み時に除外する。
+               PAPER_CLIPS の動画は選ばない（評価用の 30 本と重ならないようにするため）
 
 1 要素 = 1 クリップで ``(frames[T, 3, size, size], label)`` を返す（label は 101 クラスのアルファベット順の番号）。
-各動画の先頭から clip_len フレームを（frame_step おきに）取り出す。frame_step=2 で時間間隔が 2 倍（論文の 15fps 実験）。
+各動画の開始フレーム（paper は PAPER_CLIPS の値、random は 0）から clip_len フレームを（frame_step おきに）取り出す。
+frame_step=2 で時間間隔が 2 倍（論文の 15fps 実験）。
+
+前処理は論文と同じ: RGB で読む → 縦横比を無視して size × size にバイリニア補間でリサイズ（アンチエイリアスなし。
+OpenCV の ``cv2.resize(..., INTER_LINEAR)`` 相当）→ 255 で割って [0, 1] → ImageNet の平均・標準偏差で正規化。
 デコード結果は ``<root>/UCF-101/.cache/`` に保存して再利用する。.avi の読み込みには PyAV が必要（``pip install av``）。
 """
 
 from __future__ import annotations
 
 import random
+import warnings
 from pathlib import Path
 
 import torch
@@ -36,47 +43,45 @@ from .registry import IMAGENET_MEAN, IMAGENET_STD, register_dataset
 _VIDEO_EXTS = {".avi", ".mp4", ".mkv", ".mov", ".webm"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
-#: 論文の実験に合わせた 30 クリップ (UCF-101 のカテゴリ, 動画名)。
+#: 論文の実験で使った 30 クリップ (動画名, 開始フレーム, 総フレーム数)。先行研究（Shiba et al.）の著者から提供されたリスト。
 #:
-#: 論文（§V-B）には「5 カテゴリにまたがって 30 クリップ・各 30 連続フレーム」とあるが、具体的なリストは
-#: 公開されていない。そのため以下は次の方針で選んだ**推測**である:
-#:   - 30 本を UCF-101 の 5 カテゴリのクラス数に比例して配分
-#:     （Human–Object 20 → 6, Body-Motion 16 → 5, Human–Human 5 → 1, Instruments 10 → 3, Sports 50 → 15）
-#:   - 論文が例に挙げている Typing（ほぼ静止）と Basketball（激しい動き）は必ず含め、残りは各カテゴリから seed=0 で選択
-#:   - 動画は公式 split 1 のテスト側にあたるグループ 1 の最初のクリップ（g01_c01）。全て 60 フレーム以上（15fps 実験にも使える）
-#: 並び順はカテゴリを順に回しているので、num_clips で先頭 N 本に絞ってもカテゴリが偏りにくい。
-#: なお UCF-101 の大半は 25fps（一部 29.97fps）だが、論文どおり「元動画の連続 30 フレーム」を使う。
-PAPER_CLIPS: list[tuple[str, str]] = [
-    ("human_object", "v_ApplyLipstick_g01_c01"),
-    ("body_motion", "v_HandstandWalking_g01_c01"),
-    ("human_human", "v_HeadMassage_g01_c01"),
-    ("instruments", "v_PlayingDaf_g01_c01"),
-    ("sports", "v_Basketball_g01_c01"),
-    ("human_object", "v_JumpRope_g01_c01"),
-    ("body_motion", "v_Lunges_g01_c01"),
-    ("instruments", "v_PlayingDhol_g01_c01"),
-    ("sports", "v_BenchPress_g01_c01"),
-    ("human_object", "v_Nunchucks_g01_c01"),
-    ("body_motion", "v_PullUps_g01_c01"),
-    ("instruments", "v_PlayingViolin_g01_c01"),
-    ("sports", "v_Billiards_g01_c01"),
-    ("human_object", "v_PizzaTossing_g01_c01"),
-    ("body_motion", "v_TaiChi_g01_c01"),
-    ("sports", "v_BoxingPunchingBag_g01_c01"),
-    ("human_object", "v_SkateBoarding_g01_c01"),
-    ("body_motion", "v_WallPushups_g01_c01"),
-    ("sports", "v_BoxingSpeedBag_g01_c01"),
-    ("human_object", "v_Typing_g01_c01"),
-    ("sports", "v_Fencing_g01_c01"),
-    ("sports", "v_FloorGymnastics_g01_c01"),
-    ("sports", "v_FrisbeeCatch_g01_c01"),
-    ("sports", "v_GolfSwing_g01_c01"),
-    ("sports", "v_ParallelBars_g01_c01"),
-    ("sports", "v_Rafting_g01_c01"),
-    ("sports", "v_Rowing_g01_c01"),
-    ("sports", "v_Skijet_g01_c01"),
-    ("sports", "v_SkyDiving_g01_c01"),
-    ("sports", "v_ThrowDiscus_g01_c01"),
+#: - 開始フレームは 0 始まり（動画の先頭が 0）。開始フレームから連続する clip_len フレームを使う（間引きなし）
+#: - 総フレーム数は著者が OpenCV で読み取った参考値。デコーダによってはずれることがあり、ずれるとフレームの
+#:   対応がずれている可能性があるので、読み込み時に照合して違えば警告を出す
+#: - 25fps と 29.97fps の動画が混在するが、どちらも元のフレームレートのまま使う（リサンプリングなし）
+#: - frame_step=2（15fps 実験）では開始フレームから 60 フレーム必要で、5 本（Shotput_g12_c06, BabyCrawling_g02_c02,
+#:   TennisSwing_g18_c02, Lunges_g15_c02, CuttingInKitchen_g02_c03）は末尾を超えるので除外される（25 本になる）
+PAPER_CLIPS: list[tuple[str, int, int]] = [
+    ("v_Shotput_g12_c06", 26, 67),
+    ("v_BlowingCandles_g08_c03", 28, 101),
+    ("v_BabyCrawling_g02_c02", 57, 112),
+    ("v_TennisSwing_g20_c04", 71, 171),
+    ("v_Haircut_g15_c02", 0, 116),
+    ("v_FloorGymnastics_g21_c02", 20, 114),
+    ("v_Drumming_g24_c01", 216, 300),
+    ("v_BoxingPunchingBag_g20_c01", 87, 237),
+    ("v_TennisSwing_g08_c02", 71, 234),
+    ("v_BlowDryHair_g05_c03", 39, 188),
+    ("v_SoccerJuggling_g15_c03", 220, 599),
+    ("v_TennisSwing_g18_c02", 97, 148),
+    ("v_PlayingViolin_g20_c01", 86, 167),
+    ("v_Biking_g10_c03", 26, 240),
+    ("v_Rafting_g18_c04", 11, 128),
+    ("v_Lunges_g15_c02", 48, 97),
+    ("v_BabyCrawling_g23_c01", 12, 116),
+    ("v_BabyCrawling_g17_c03", 45, 108),
+    ("v_Billiards_g05_c03", 352, 592),
+    ("v_Drumming_g12_c05", 135, 300),
+    ("v_FieldHockeyPenalty_g06_c01", 5, 115),
+    ("v_PlayingFlute_g17_c06", 117, 203),
+    ("v_RopeClimbing_g04_c02", 31, 158),
+    ("v_BabyCrawling_g07_c02", 48, 145),
+    ("v_PommelHorse_g19_c01", 40, 307),
+    ("v_CuttingInKitchen_g02_c03", 70, 123),
+    ("v_Swing_g16_c04", 37, 109),
+    ("v_SkateBoarding_g22_c05", 92, 166),
+    ("v_SumoWrestling_g19_c01", 24, 101),
+    ("v_PlayingViolin_g18_c02", 17, 182),
 ]
 
 #: UCF-101 の 101 クラス（アルファベット順。ラベル番号はこの順）
@@ -164,15 +169,18 @@ class UCF101Clips(Dataset):
         self.size = size
         self.cache_dir = self.base / ".cache" if cache else None
 
+        #: 動画名 → (開始フレーム, 総フレーム数の参考値)
+        starts: dict[str, tuple[int, int | None]] = {}
         if selection == "paper":
-            videos = [v for _, v in PAPER_CLIPS][:num_clips]
+            videos = [v for v, _, _ in PAPER_CLIPS][:num_clips]
+            starts = {v: (start, total) for v, start, total in PAPER_CLIPS}
         elif selection == "random":
             videos = self._random_videos(num_clips or 30, seed, download, parse_groups(groups), clips_per_class)
         else:
             raise KeyError(f"未知の selection です: {selection!r}（\"paper\" / \"random\"）")
 
-        #: (クラス名, 動画のパス, ラベル) のリスト
-        self.clips: list[tuple[str, Path, int]] = []
+        #: (クラス名, 動画のパス, ラベル, 開始フレーム, 総フレーム数の参考値（無ければ None）) のリスト
+        self.clips: list[tuple[str, Path, int, int, int | None]] = []
         missing = []
         for v in videos:
             cls = class_of(v)
@@ -180,7 +188,8 @@ class UCF101Clips(Dataset):
             if path is None:
                 path = self.base / cls / f"{v}.avi"
                 missing.append(path)
-            self.clips.append((cls, path, UCF101_CLASSES.index(cls)))
+            start, total = starts.get(v, (0, None))
+            self.clips.append((cls, path, UCF101_CLASSES.index(cls), start, total))
 
         if missing:
             if not download:
@@ -191,19 +200,19 @@ class UCF101Clips(Dataset):
             members = [f"UCF-101/{p.parent.name}/{p.name}" for p in missing]
             fetch_zip_members(UCF101_ZIP_URLS, members, self.base.parent)
 
-        # random で選んだ動画はまれに clip_len より短いので、ここで 1 回読んで外す（読んだ結果はキャッシュに残る）
-        if selection == "random":
-            kept = []
-            for i, clip in enumerate(self.clips):
-                try:
-                    self._load_u8(i)
-                except _TooShortError as e:
-                    print(f"除外: {e}")
-                    continue
-                kept.append(clip)
-            if not kept:
-                raise ValueError(f"clip_len={clip_len} フレーム以上ある動画がありません")
-            self.clips = kept
+        # 開始フレームから clip_len × frame_step フレームに足りない動画（random でまれにある動画や、paper の 15fps 実験での
+        # 5 本）は、ここで 1 回読んで外す（読んだ結果はキャッシュに残る）
+        kept = []
+        for i, clip in enumerate(self.clips):
+            try:
+                self._load_u8(i)
+            except _TooShortError as e:
+                print(f"除外: {e}")
+                continue
+            kept.append(clip)
+        if not kept:
+            raise ValueError(f"clip_len={clip_len}（frame_step={frame_step}）のフレーム数がある動画がありません")
+        self.clips = kept
 
     def _find(self, cls: str, video: str) -> Path | None:
         """手元にある動画（またはフレームのディレクトリ）を探す。"""
@@ -213,8 +222,11 @@ class UCF101Clips(Dataset):
         return None
 
     def _random_videos(self, num_clips: int, seed: int, download: bool, groups: set[int] | None = None, per_class: int = 1) -> list[str]:
+        paper = {v for v, _, _ in PAPER_CLIPS}
+
         def keep(names: list[str]) -> list[str]:
-            return sorted(v for v in names if groups is None or group_of(v) in groups)
+            # 評価用の PAPER_CLIPS とは重ならないようにする
+            return sorted(v for v in names if (groups is None or group_of(v) in groups) and v not in paper)
 
         local = {}
         if self.base.is_dir():
@@ -255,18 +267,24 @@ class UCF101Clips(Dataset):
 
     def _load_u8(self, i: int) -> torch.Tensor:
         """i 番目のクリップを (T, 3, size, size) uint8 で返す（キャッシュがあればそれを使い、なければ作る）。"""
-        path = self.clips[i][1]
+        _, path, _, start, total = self.clips[i]
+        need = self.clip_len * self.frame_step
         cache_path = None
         if self.cache_dir is not None:
-            cache_path = self.cache_dir / f"{path.stem}_T{self.clip_len}_s{self.frame_step}_{self.size}_u8.pt"
+            # bl = バイリニア（アンチエイリアスなし）。前処理を変えた古いキャッシュとは名前で区別する
+            cache_path = self.cache_dir / f"{path.stem}_f{start}_T{self.clip_len}_s{self.frame_step}_{self.size}_bl_u8.pt"
         if cache_path is not None and cache_path.exists():
             x = torch.load(cache_path, weights_only=True)
         else:
-            frames = _read_frames(path, self.clip_len * self.frame_step)[:: self.frame_step]  # (T, H, W, 3) uint8
-            if len(frames) < self.clip_len:
-                raise _TooShortError(f"{path} のフレーム数が足りません（{len(frames)} < {self.clip_len}）")
-            x = frames.permute(0, 3, 1, 2).float()
-            x = F.interpolate(x, size=(self.size, self.size), mode="bilinear", align_corners=False, antialias=True)
+            frames = _read_frames(path, need, start, total)  # (n, H, W, 3) uint8
+            if len(frames) < need:
+                raise _TooShortError(
+                    f"{path.stem} は開始フレーム {start} から {need} フレーム（clip_len={self.clip_len} × frame_step={self.frame_step}）"
+                    f"取れません（{len(frames)} フレームしかない）"
+                )
+            x = frames[:: self.frame_step].permute(0, 3, 1, 2).float()
+            # 論文と同じく cv2.resize の INTER_LINEAR 相当（アンチエイリアスなし）
+            x = F.interpolate(x, size=(self.size, self.size), mode="bilinear", align_corners=False, antialias=False)
             # キャッシュは uint8 で持つ（float32 の 1/4 の容量）。キャッシュの有無で入力が変わらないよう、常にここで丸める
             x = x.round().clamp(0, 255).to(torch.uint8)
             if cache_path is not None:
@@ -279,25 +297,42 @@ class _TooShortError(ValueError):
     """動画のフレーム数が clip_len に足りない。"""
 
 
-def _read_frames(path: Path, n: int) -> torch.Tensor:
-    """動画（またはフレーム画像のディレクトリ）の先頭 n フレームを (n, H, W, 3) uint8 で読む。"""
+def _read_frames(path: Path, n: int, start: int = 0, expected_total: int | None = None) -> torch.Tensor:
+    """動画（またはフレーム画像のディレクトリ）のフレーム start〜start+n−1（0 始まり）を (≤n, H, W, 3) uint8（RGB）で読む。
+
+    動画の末尾を超える分は返さない（呼び出し側で長さを確認する）。expected_total（総フレーム数の参考値）を渡すと、
+    最後まで数えて照合し、違えば警告を出す（デコーダの違いでフレームの対応がずれている可能性があるため）。
+    """
     import numpy as np
 
     if path.is_dir():
         from PIL import Image
 
-        files = sorted(p for p in path.iterdir() if p.suffix.lower() in _IMAGE_EXTS)[:n]
-        return torch.from_numpy(np.stack([np.asarray(Image.open(p).convert("RGB")) for p in files]))
-    try:
-        import av
-    except ImportError as e:
-        raise ImportError("動画の読み込みには `pip install av`（または pip install -e \".[video]\"）が必要です") from e
-    frames = []
-    with av.open(str(path)) as container:
-        for frame in container.decode(video=0):
-            frames.append(frame.to_ndarray(format="rgb24"))
-            if len(frames) >= n:
-                break
+        files = sorted(p for p in path.iterdir() if p.suffix.lower() in _IMAGE_EXTS)
+        count = len(files)
+        frames = [np.asarray(Image.open(p).convert("RGB")) for p in files[start : start + n]]
+    else:
+        try:
+            import av
+        except ImportError as e:
+            raise ImportError("動画の読み込みには `pip install av`（または pip install -e \".[video]\"）が必要です") from e
+        frames = []
+        count = 0
+        with av.open(str(path)) as container:
+            for frame in container.decode(video=0):
+                if start <= count < start + n:
+                    frames.append(frame.to_ndarray(format="rgb24"))
+                count += 1
+                if count >= start + n and expected_total is None:
+                    break
+    if expected_total is not None and count != expected_total:
+        warnings.warn(
+            f"{path.name} の総フレーム数が {count} で、参考値 {expected_total} と違います。"
+            f"デコーダの違いで、開始フレーム {start} の位置が論文とずれている可能性があります",
+            stacklevel=2,
+        )
+    if not frames:
+        return torch.zeros(0, 1, 1, 3, dtype=torch.uint8)
     return torch.from_numpy(np.stack(frames))
 
 
