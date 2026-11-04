@@ -558,6 +558,21 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.y
 python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>
 ```
 
+**量子化範囲を図で確かめる**（解説資料用）: `scripts/qi_histogram.py` は、1 クリップの I フレームの特徴と、次の P フレームで送る差分 δ' の
+ヒストグラムに、D+DZ（R_P = P99(|δ'|)）と QI（q = q_I、範囲は I と同じ ±R_I）の量子化範囲・段の境界・dead zone を重ねて描きます。
+3 枚とも同じ大きさで、P フレームの図の横軸は I フレームの図とそろえてあります。
+
+```bash
+python scripts/qi_histogram.py                                   # efficientnet_v2_s / features_4, 4 bit, クリップ 0 → docs/images/qi_*.png
+python scripts/qi_histogram.py --target resnet50 --bits 2 --clip 3 --out figs --log   # 別のモデル・縦軸を対数に
+```
+
+- 緑の帯 = 量子化範囲（そのまま段に割り当てられる）、橙 = 範囲外（端の段に飽和。帯の中にその割合を書く）、赤 = dead zone（0 になる）、細線 = 段の境界
+- 縦軸は線形（範囲外が 1% ほどしかないことが見た目でわかる）。裾の分布を見たいときは `--log` で対数にする
+- 既定のモデルは efficientnet_v2_s（SiLU。負の値も出るので I フレームの分布がほぼ左右対称になる）。resnet50 / vgg16 は ReLU の後なので 0 以上に偏る
+- 統計（q・0 になった割合・エントロピー・範囲外の割合）の表を標準出力と `qi_summary_table.png` に出す
+  （efficientnet_v2_s / features_4, 4 bit, クリップ 0 の例: エントロピーは D+DZ 3.04 → QI 1.19 bit/要素、0 の割合は 31% → 77%）
+
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 4 つなので、sbatch の既定の `--array=0-3` のまま）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
 今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
