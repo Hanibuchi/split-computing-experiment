@@ -6,6 +6,9 @@
 
 例:
     python scripts/merge_results.py runs/packet_loss_ucf101_*_2026* -o runs/packet_loss_ucf101_merged
+
+    # Slurm の配列ジョブ（packet_loss_sweep.py --group-dir）の結果: フォルダの下のモデルごとのフォルダを、そのフォルダ自体にまとめる
+    python scripts/merge_results.py --group runs/packet_loss_ucf101_12345
 """
 
 from __future__ import annotations
@@ -30,6 +33,13 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
         with open(csv_path, newline="", encoding="utf-8") as f:
             return list(csv.DictReader(f))
     return []
+
+
+def group_members(group_dir: Path) -> list[Path]:
+    """group_dir の直下の、結果（results.jsonl / results.csv）のあるフォルダ（figures/ などは含まない）。"""
+    return sorted(
+        d for d in Path(group_dir).iterdir() if d.is_dir() and any((d / f"results.{ext}").exists() for ext in ("jsonl", "csv"))
+    )
 
 
 def run_time(run_dir: Path) -> str:
@@ -70,11 +80,20 @@ def merge_runs(run_dirs: list[Path], out_dir: Path) -> dict[tuple, Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("run_dirs", nargs="+", type=Path, help="まとめる実行フォルダ（runs/<実験名>_<日時>）")
-    parser.add_argument("-o", "--out", type=Path, required=True, help="出力フォルダ")
+    parser.add_argument("run_dirs", nargs="*", type=Path, help="まとめる実行フォルダ（runs/<実験名>_<日時>）")
+    parser.add_argument("-o", "--out", type=Path, help="出力フォルダ（--group のときは省略でき、既定はそのフォルダ）")
+    parser.add_argument(
+        "--group", type=Path, metavar="DIR", help="DIR の下の実行フォルダ（packet_loss_sweep.py --group-dir の結果）を全てまとめる"
+    )
     args = parser.parse_args()
 
-    run_dirs = [d for d in args.run_dirs if d.resolve() != args.out.resolve()]  # glob に出力先が混ざっても無視する
+    run_dirs = list(args.run_dirs)
+    if args.group:
+        run_dirs += group_members(args.group)
+        args.out = args.out or args.group
+    if not run_dirs or args.out is None:
+        parser.error("まとめる実行フォルダと -o（または --group）を指定してください")
+    run_dirs = [d for d in run_dirs if d.resolve() != args.out.resolve()]  # glob に出力先が混ざっても無視する
     source = merge_runs(run_dirs, args.out)
     for (model, split_point), d in source.items():
         print(f"  {model}/{split_point}: {d}")
