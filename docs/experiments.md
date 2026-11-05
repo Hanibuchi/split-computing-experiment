@@ -523,6 +523,17 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+FEC10 --scheme D+DZ+FEC25
 ```
 
+FEC の検証用に `configs/packet_loss_ucf101_fec.yaml` もあります。efficientnet_v2_s / features_4 と vgg16 / features_16 の 2 モデル、
+F+Sym / D+DZ / D+DZ+FEC10 / D+DZ+FEC25 の 4 方式、bernoulli と gilbert_elliott のロス率 0〜0.2 だけを回します
+（FEC が効かない frame 単位のロスは外しています。他の項目は本番の設定と同じ）。
+1 フレームのパケット数が少ないモデル（efficientnet_v2_s）と多いモデル（vgg16）で、FEC の効き方を比べられます。
+Slurm クラスタでは target が 2 つなので `--array=0-1` を付けて投げます:
+
+```bash
+CONFIG=configs/packet_loss_ucf101_fec.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+# 結果: runs/packet_loss_ucf101_fec_<ジョブID>/
+```
+
 実測例（ResNet50 / layer2, 4 ビット, Gilbert-Elliott L=4, 2 クリップ・シード 1 つの動作確認なので値は粗い）:
 
 | 方式 | 送信量 [B/フレーム] | p=0.05: residual_loss_rate | p=0.05: agreement_drop | p=0.1: residual_loss_rate | p=0.1: agreement_drop |

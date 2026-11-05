@@ -1,0 +1,42 @@
+# =====================================================================
+# scripts/packet_loss_sweep.py 用の FEC 検証の設定
+#   本番の configs/packet_loss_ucf101.yaml を base として読み、次の 3 項目だけを置き換える
+#   （list は丸ごと置き換わる。ビット数・GoP・MTU・クリップ・シード・p_step などは本番と同じ）:
+#     targets : efficientnet_v2_s / features_4 と vgg16 / features_16 の 2 つ
+#               （1 フレームのパケット数が少ないモデルと多いモデルで、FEC の効き方を比べる）
+#     schemes : F+Sym / D+DZ / D+DZ+FEC10 / D+DZ+FEC25
+#     losses  : bernoulli と gilbert_elliott のロス率 0, 0.01, 0.02, 0.05, 0.1, 0.2
+#               （FEC が原理的に効かない frame 単位のロスは外す）
+#
+#   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_fec.yaml
+#   Slurm クラスタ（target が 2 つなので --array=0-1 を必ず付ける）:
+#     CONFIG=configs/packet_loss_ucf101_fec.yaml sbatch --array=0-1 scripts/slurm/packet_loss.sbatch
+# =====================================================================
+
+base: packet_loss_ucf101.yaml
+experiment_name: packet_loss_ucf101_fec
+
+# 配列ジョブの番号 0: efficientnet_v2_s, 1: vgg16
+targets:
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_4}   # S4: 128x14x14
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 16: 256x28x28
+
+schemes:
+  - {name: F+Sym, scheme: fd, p_quant: sym}                    # 差分を取らない基準
+  - {name: D+DZ, scheme: dpcm, p_quant: dz}                    # FEC なし
+  - {name: D+DZ+FEC10, scheme: dpcm, p_quant: dz, fec: 0.1}    # パリティ 10%（m = ceil(0.1·k)）
+  - {name: D+DZ+FEC25, scheme: dpcm, p_quant: dz, fec: 0.25}   # パリティ 25%（m = ceil(0.25·k)）
+
+# ロス率 0 は bernoulli と gilbert_elliott で結果が同じなので 1 つだけ
+losses:
+  - {name: bernoulli, p: 0.0, label: no_loss}
+  - {name: bernoulli, p: 0.01}
+  - {name: bernoulli, p: 0.02}
+  - {name: bernoulli, p: 0.05}
+  - {name: bernoulli, p: 0.1}
+  - {name: bernoulli, p: 0.2}
+  - {name: gilbert_elliott, p: 0.01, burst_len: 4}   # 平均バースト長 4 パケット（本番と同じ）
+  - {name: gilbert_elliott, p: 0.02, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.05, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.1, burst_len: 4}
+  - {name: gilbert_elliott, p: 0.2, burst_len: 4}
