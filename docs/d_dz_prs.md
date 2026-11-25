@@ -181,6 +181,7 @@ flowchart TB
   そのため **I フレームは常に対称量子化**で、`p_quant: dz` は P フレームにだけ効く
 - 量子化したインデックスは、パケットごとに独立した適応算術符号でエントロピー符号化します（`src/splitcomp/temporal/packet.py`）。
   パケット単体で復号できるので、**ロスしたパケットに入っていた要素だけ**が欠けます
+  （仕組みと圧縮効率は [entropy_coding.md](entropy_coding.md) を参照）
 
 ---
 

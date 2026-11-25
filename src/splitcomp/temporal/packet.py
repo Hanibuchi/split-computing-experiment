@@ -15,6 +15,7 @@
         適応 Laplace モデルの符号長は記号の順序によらず、パケット内の記号のカウントだけで決まる。
         ヘッダには算術符号の復号に必要な要素数 u32 を加え（:data:`AC_HEADER_BYTES`）、
         符号の終端分として :data:`AC_TAIL_BYTES` を足す。
+        仕組み（例を使った符号化・復号の説明）と実験での圧縮効率は docs/entropy_coding.md を参照。
     固定長（:func:`packet_assignment` / :func:`num_packets` / :func:`frame_bytes`）:
         各要素を b ビット固定長で詰める（比較用の参考。ヘッダは :data:`HEADER_BYTES`）。
 
