@@ -201,9 +201,10 @@ class TemporalSchemeConfig:
     #: P フレームのステップ幅 q の決め方（既定は "intra"）。
     #: "intra": 直近の I フレームの q × p_step_scale に固定する（差分が小さいほど送信量が減る。例: D+DZ+QI）。
     #: "adaptive": 毎フレーム差分の範囲から決め直す。
-    #: 論文（Shiba et al.）は、圧縮率の評価では q を固定（= intra）、精度の評価ではフレームごとに決め直して（= adaptive）
-    #: いたらしい（著者に確認）。圧縮率と精度を同じ設定で出せるように intra を既定にしている。
-    #: 論文の精度の数字と比べるときは p_step: adaptive を明示する。
+    #: 論文（Shiba et al.）の設定は adaptive（式 (9) で q を差分自身の範囲から決める。Table 8 の精度にも Table 9 のエントロピーにも
+    #: adaptive がよく合う）。著者からは「圧縮率は q 固定で評価した」と聞いたが、論文本文に記述は無く、再現結果とも合わない。
+    #: intra は本基盤の既定で、送信量が減り、送信量をそろえると一致率も同等以上になるので選んでいる。
+    #: 論文の数字と比べるときは p_step: adaptive を明示する。
     p_step: str = "intra"
     #: p_step="intra" のときの倍率（大きいほど P フレームが粗くなり、送信量が減る）。
     p_step_scale: float = 1.0

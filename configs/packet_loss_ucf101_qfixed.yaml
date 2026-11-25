@@ -3,7 +3,7 @@
 #   quick 設定（Gilbert-Elliott のロス）を base にして、モデル（本番と同じ 4 つ）・方式・ビット数を置き換える。
 #
 #   P フレームの q の既定は intra（I フレームの q に固定 = D+DZ+QI と同じ）。この設定の D+DZ は比較用に
-#   p_step: adaptive を明示している（論文の精度評価の設定）。
+#   p_step: adaptive を明示している（論文の設定。式 (9)）。
 #
 #   adaptive は P フレームごとに差分の範囲 R = P99(|δ|) から q を決め直すので、差分が小さくても送信量はあまり減らない
 #   （q も小さくなり、インデックスの分布の形が変わらないため）。q を I フレームの q に固定すると、差分が小さいほど
@@ -36,6 +36,6 @@ bits: [2, 4, 8]
 
 schemes:
   - {name: F+Sym, scheme: fd, p_quant: sym}
-  - {name: D+DZ, scheme: dpcm, p_quant: dz, p_step: adaptive}                        # P フレームごとに q を決め直す（論文の精度評価）
+  - {name: D+DZ, scheme: dpcm, p_quant: dz, p_step: adaptive}                        # P フレームごとに q を決め直す（論文の設定）
   - {name: D+DZ+QI, scheme: dpcm, p_quant: dz, p_step: intra}                          # P フレームの q = I フレームの q
   - {name: D+DZ+QI0.5, scheme: dpcm, p_quant: dz, p_step: intra, p_step_scale: 0.5}    # P フレームの q = I フレームの q × 0.5
