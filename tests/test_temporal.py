@@ -237,15 +237,15 @@ def test_streams_must_be_positive():
         TemporalEncoder("dpcm", 4, streams=0)
 
 
-# --- PRS（NACK による参照フレーム選択） ------------------------------------------------
+# --- RPS（NACK による参照フレーム選択） ------------------------------------------------
 
 
-def _run_prs(feats, lost_frames=(), delay=1, gop=30, streams=1, bits=8, prs=True):
-    """PRS で符号化・復号する。lost_frames のフレームは全要素を落とし、delay フレーム後に NACK が端末に届く。
+def _run_rps(feats, lost_frames=(), delay=1, gop=30, streams=1, bits=8, rps=True):
+    """RPS で符号化・復号する。lost_frames のフレームは全要素を落とし、delay フレーム後に NACK が端末に届く。
 
     戻り値: (クラウドの復元, 送ったフレームのリスト, 端末が想定した f̂ のリスト, 符号化器)
     """
-    enc = TemporalEncoder("dpcm", bits, gop, "dz", streams=streams, prs=prs)
+    enc = TemporalEncoder("dpcm", bits, gop, "dz", streams=streams, rps=rps)
     dec = TemporalDecoder()
     out, frames, hats = [], [], []
     for t, f in enumerate(feats):
@@ -260,23 +260,23 @@ def _run_prs(feats, lost_frames=(), delay=1, gop=30, streams=1, bits=8, prs=True
     return torch.stack(out), frames, hats, enc
 
 
-def test_prs_without_loss_matches_dpcm():
-    """NACK が来なければ、PRS は通常の DPCM と全く同じ符号化になる。"""
+def test_rps_without_loss_matches_dpcm():
+    """NACK が来なければ、RPS は通常の DPCM と全く同じ符号化になる。"""
     feats = _video(T=24)
     for streams in (1, 2):
-        _, prs, _, _ = _run_prs(feats, gop=12, streams=streams)
-        _, ref, _, _ = _run_prs(feats, gop=12, streams=streams, prs=False)
-        for a, b in zip(prs, ref):
+        _, rps, _, _ = _run_rps(feats, gop=12, streams=streams)
+        _, ref, _, _ = _run_rps(feats, gop=12, streams=streams, rps=False)
+        for a, b in zip(rps, ref):
             assert (a.kind, a.ref, a.q) == (b.kind, b.ref, b.q)
             assert torch.equal(a.idx, b.idx)
 
 
 @pytest.mark.parametrize("delay", [1, 3])
-def test_prs_stops_propagation_after_feedback(delay):
+def test_rps_stops_propagation_after_feedback(delay):
     """P フレーム lost を失うと、NACK が届くまでの delay フレームだけずれ、その後は壊れていないフレームを参照して元に戻る。"""
     feats = _video(T=20)
     lost = 5
-    out, frames, hats, enc = _run_prs(feats, lost_frames={lost}, delay=delay)
+    out, frames, hats, enc = _run_rps(feats, lost_frames={lost}, delay=delay)
     diff = torch.stack([(o - h).abs().amax() for o, h in zip(out, hats)])
     assert torch.all(diff[:lost] == 0)
     assert torch.all(diff[lost : lost + delay] > 0)  # NACK が届くまでは伝搬する
@@ -287,10 +287,10 @@ def test_prs_stops_propagation_after_feedback(delay):
     assert enc.forced_intra == 0
 
 
-def test_prs_iframe_loss_forces_intra():
+def test_rps_iframe_loss_forces_intra():
     """GoP 先頭の I フレームを失うと参照できる無事なフレームが無いので、NACK が届いたフレームを I フレームにする。"""
     feats = _video(T=10)
-    out, frames, hats, enc = _run_prs(feats, lost_frames={0}, delay=2)
+    out, frames, hats, enc = _run_rps(feats, lost_frames={0}, delay=2)
     assert frames[2].kind == "I" and frames[2].ref is None
     assert frames[3].ref == 2
     assert enc.forced_intra == 1
@@ -298,27 +298,27 @@ def test_prs_iframe_loss_forces_intra():
     assert torch.all(diff[:2] > 0) and torch.all(diff[2:] == 0)
 
 
-def test_prs_multi_stream_falls_back_to_newer_frame():
+def test_rps_multi_stream_falls_back_to_newer_frame():
     """多系列で、通常の参照以前に無事なフレームが無いときは、より新しい無事なフレームを参照する（I フレームにはしない）。"""
     feats = _video(T=12)
     # streams=2: 1 → 0(I)。0 が壊れると 0 以前に無事なフレームが無いので、強制 I フレーム 2 の後は 2 を参照する
-    _, frames, _, enc = _run_prs(feats, lost_frames={0}, delay=2, streams=2)
+    _, frames, _, enc = _run_rps(feats, lost_frames={0}, delay=2, streams=2)
     assert frames[2].kind == "I"
     assert frames[3].ref == 2  # 通常なら 1（壊れている）だが、より新しい 2 を参照する
     assert frames[4].ref == 2
     assert enc.forced_intra == 1
 
 
-def test_prs_ignores_nack_of_previous_gop():
+def test_rps_ignores_nack_of_previous_gop():
     feats = _video(T=12)
-    out, frames, hats, _ = _run_prs(feats, lost_frames={5}, delay=2, gop=6)
+    out, frames, hats, _ = _run_rps(feats, lost_frames={5}, delay=2, gop=6)
     assert [f.kind for f in frames[6:]] == list("IPPPPP")
     assert all(f.ref == f.t - 1 for f in frames[7:])
 
 
-def test_prs_requires_p_frames():
+def test_rps_requires_p_frames():
     with pytest.raises(ValueError):
-        TemporalEncoder("fd", 4, prs=True)
+        TemporalEncoder("fd", 4, rps=True)
 
 
 # --- P フレームのステップ幅の固定（p_step="intra"） ------------------------------------------
@@ -380,9 +380,9 @@ def test_intra_step_is_default():
 
 
 def test_intra_step_follows_forced_intra():
-    """PRS で P フレームの代わりに I フレームにしたら、以降の P フレームはそのフレームの q を使う。"""
+    """RPS で P フレームの代わりに I フレームにしたら、以降の P フレームはそのフレームの q を使う。"""
     feats = _video(T=8)
-    enc = TemporalEncoder("dpcm", 4, 30, "dz", prs=True, p_step="intra")
+    enc = TemporalEncoder("dpcm", 4, 30, "dz", rps=True, p_step="intra")
     frames = []
     for t, f in enumerate(feats):
         if t == 2:
@@ -401,13 +401,13 @@ def test_invalid_p_step():
 
 
 def test_sweep_encoding_key_distinguishes_step_settings():
-    """sweep の符号化の使い回しのキーは、clip / p_step / p_step_scale の違いを区別する（PRS・FEC・restorer は区別しない）。"""
+    """sweep の符号化の使い回しのキーは、clip / p_step / p_step_scale の違いを区別する（RPS・FEC・restorer は区別しない）。"""
     from splitcomp.config import TemporalSchemeConfig
 
     sweep = _load_script("packet_loss_sweep")
     base = TemporalSchemeConfig("D+DZ", "dpcm", "dz", p_step="adaptive")
     key = sweep.encoding_key(base, 4)
-    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, p_step="adaptive"), 4) == key
+    assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+RPS", "dpcm", "dz", rps=True, p_step="adaptive"), 4) == key
     assert sweep.encoding_key(TemporalSchemeConfig("D+DZ+FEC10", "dpcm", "dz", fec=0.1, p_step="adaptive"), 4) == key
     others = [
         TemporalSchemeConfig("D+DZ+Cmax", "dpcm", "dz", clip="max"),
@@ -940,16 +940,16 @@ def test_encode_once_matches_reference(interleave):
                                 assert got == v, k
 
 
-def test_prs_clip_matches_dpcm_without_loss_and_helps_with_loss():
-    """sweep の prs_clip: ロスなしなら D+DZ と集計値が一致し、ロスありでは D+DZ より特徴 MSE が小さく、NACK を数える。"""
+def test_rps_clip_matches_dpcm_without_loss_and_helps_with_loss():
+    """sweep の rps_clip: ロスなしなら D+DZ と集計値が一致し、ロスありでは D+DZ より特徴 MSE が小さく、NACK を数える。"""
     import numpy as np
 
     from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
 
     sweep = _load_script("packet_loss_sweep")
     dz = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
-    prs = TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, feedback_delay=1)
-    cfg = PacketLossConfig(schemes=[dz, prs], bits=[4], gop=15, mtu=60)
+    rps = TemporalSchemeConfig("D+DZ+RPS", "dpcm", "dz", rps=True, feedback_delay=1)
+    cfg = PacketLossConfig(schemes=[dz, rps], bits=[4], gop=15, mtu=60)
     torch.manual_seed(0)
     tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
     feats = _video(T=15, shape=(8, 7, 7))
@@ -958,33 +958,33 @@ def test_prs_clip_matches_dpcm_without_loss_and_helps_with_loss():
     def run(scheme, loss_cfg, reuse=False):
         acc = sweep._Accumulator(cfg.gop)
         encoded = sweep.encode_clip(feats, cfg, scheme, 4)
-        if scheme.prs:
-            sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc, encoded=encoded if reuse else None)
+        if scheme.rps:
+            sweep.rps_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc, encoded=encoded if reuse else None)
         else:
             sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, 0, 0, acc)
         return acc
 
     no_loss = LossConfig("bernoulli", 0.0)
-    a, b = run(dz, no_loss), run(prs, no_loss)
+    a, b = run(dz, no_loss), run(rps, no_loss)
     for k, v in vars(a).items():
         got = vars(b)[k]
         assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == pytest.approx(v), k
     assert b.nacks == 0
 
     lossy = LossConfig("bernoulli", 0.1)
-    a, b = run(dz, lossy), run(prs, lossy)
+    a, b = run(dz, lossy), run(rps, lossy)
     assert b.nacks > 0 and a.nacks == 0
     assert b.mse < a.mse
     # NACK を受ける前のフレームでフィードバックなしの符号化を使い回しても、結果は完全に一致する
     for loss_cfg in (no_loss, lossy, LossConfig("gilbert_elliott", 0.2, burst_len=3)):
-        c, d = run(prs, loss_cfg), run(prs, loss_cfg, reuse=True)
+        c, d = run(rps, loss_cfg), run(rps, loss_cfg, reuse=True)
         for k, v in vars(c).items():
             got = vars(d)[k]
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 
 def test_fec_clip_costs_bytes_and_recovers_loss():
-    """sweep の FEC: ロスなしなら D+DZ と精度が同じで送信量だけ増え、ロスありでは残るロスと特徴 MSE が減る。PRS とも組み合わせられる。"""
+    """sweep の FEC: ロスなしなら D+DZ と精度が同じで送信量だけ増え、ロスありでは残るロスと特徴 MSE が減る。RPS とも組み合わせられる。"""
     import numpy as np
 
     from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
@@ -992,8 +992,8 @@ def test_fec_clip_costs_bytes_and_recovers_loss():
     sweep = _load_script("packet_loss_sweep")
     dz = TemporalSchemeConfig("D+DZ", "dpcm", "dz")
     fec = TemporalSchemeConfig("D+DZ+FEC25", "dpcm", "dz", fec=0.25)
-    prs = TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True)
-    prs_fec = TemporalSchemeConfig("D+DZ+PRS+FEC", "dpcm", "dz", prs=True, fec=0.25)
+    rps = TemporalSchemeConfig("D+DZ+RPS", "dpcm", "dz", rps=True)
+    rps_fec = TemporalSchemeConfig("D+DZ+RPS+FEC", "dpcm", "dz", rps=True, fec=0.25)
     cfg = PacketLossConfig(schemes=[dz, fec], bits=[4], gop=15, mtu=60)
     torch.manual_seed(0)
     tail = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(8 * 7 * 7, 10))
@@ -1003,8 +1003,8 @@ def test_fec_clip_costs_bytes_and_recovers_loss():
 
     def run(scheme, loss_cfg):
         acc = sweep._Accumulator(cfg.gop)
-        if scheme.prs:
-            sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc)
+        if scheme.rps:
+            sweep.rps_clip(feats, ref_pred, tail, "cpu", cfg, scheme, 4, loss_cfg, 0, 0, acc)
         else:
             sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, 0, 0, acc, fec=scheme.fec)
         return acc
@@ -1023,25 +1023,25 @@ def test_fec_clip_costs_bytes_and_recovers_loss():
     assert b.residual_lost / b.data_packets < a.residual_lost / a.data_packets
     assert b.mse < a.mse
 
-    # PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返す
-    c, d = run(prs, lossy), run(prs_fec, lossy)
+    # RPS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返す
+    c, d = run(rps, lossy), run(rps_fec, lossy)
     assert 0 < c.nacks and d.nacks < c.nacks
-    for k, v in vars(run(prs, no_loss)).items():
+    for k, v in vars(run(rps, no_loss)).items():
         if k not in ("bytes", "packets", "parity_packets", "p_bytes", "max_frame_bytes"):
-            got = vars(run(prs_fec, no_loss))[k]
+            got = vars(run(rps_fec, no_loss))[k]
             assert np.array_equal(got, v) if isinstance(v, np.ndarray) else got == v, k
 
 
 def _parallel_setup():
-    """並列化のテスト用の小さな設定（PRS・FEC・多系列を含む。MTU を小さくして 1 フレームを複数パケットに分ける）。"""
+    """並列化のテスト用の小さな設定（RPS・FEC・多系列を含む。MTU を小さくして 1 フレームを複数パケットに分ける）。"""
     from splitcomp.config import LossConfig, PacketLossConfig, TemporalSchemeConfig
 
     schemes = [
         TemporalSchemeConfig("F+Sym", "fd", "sym"),
         TemporalSchemeConfig("D+DZ", "dpcm", "dz"),
         TemporalSchemeConfig("D+DZ+S2", "dpcm", "dz", streams=2),
-        TemporalSchemeConfig("D+DZ+PRS", "dpcm", "dz", prs=True, feedback_delay=1),
-        TemporalSchemeConfig("D+DZ+PRS3", "dpcm", "dz", prs=True, feedback_delay=3),
+        TemporalSchemeConfig("D+DZ+RPS", "dpcm", "dz", rps=True, feedback_delay=1),
+        TemporalSchemeConfig("D+DZ+RPS3", "dpcm", "dz", rps=True, feedback_delay=3),
         TemporalSchemeConfig("D+DZ+FEC25", "dpcm", "dz", fec=0.25),
     ]
     losses = [
@@ -1086,8 +1086,8 @@ def _accs_by_tasks(sweep, cfg, conditions, clips, run):
 
 
 def test_run_task_matches_per_condition():
-    """_run_task（tail を全条件まとめて 1 回・PRS のパケット分割キャッシュあり）の結果を足し込むと、
-    条件ごとに decode_clip / prs_clip を呼ぶ以前の版とビット単位で一致する。"""
+    """_run_task（tail を全条件まとめて 1 回・RPS のパケット分割キャッシュあり）の結果を足し込むと、
+    条件ごとに decode_clip / rps_clip を呼ぶ以前の版とビット単位で一致する。"""
     from collections import defaultdict
 
     sweep = _load_script("packet_loss_sweep")
@@ -1100,16 +1100,16 @@ def test_run_task_matches_per_condition():
                 encoded = sweep.encode_clip(feats, cfg, scheme, bits)
                 for loss_cfg, seed in conditions:
                     acc = want[(scheme.name, bits, loss_cfg.display_name(), seed)]
-                    if scheme.prs:
-                        sweep.prs_clip(feats, ref_pred, tail, "cpu", cfg, scheme, bits, loss_cfg, seed, clip, acc, encoded=encoded)
+                    if scheme.rps:
+                        sweep.rps_clip(feats, ref_pred, tail, "cpu", cfg, scheme, bits, loss_cfg, seed, clip, acc, encoded=encoded)
                     else:
                         sweep.decode_clip(encoded, feats, ref_pred, tail, "cpu", cfg, loss_cfg, seed, clip, acc, fec=scheme.fec)
 
-    reused = frozenset({sweep.encoding_key(cfg.schemes[1], b) for b in cfg.bits})  # D+DZ / PRS / FEC は符号化が同じ
+    reused = frozenset({sweep.encoding_key(cfg.schemes[1], b) for b in cfg.bits})  # D+DZ / RPS / FEC は符号化が同じ
     sweep._init_worker(cfg, tail, torch.device("cpu"), {}, conditions, reused_encodings=reused)
     got = _accs_by_tasks(sweep, cfg, conditions, clips, sweep._run_task)
     _assert_accs_equal(got, want)
-    assert sum(a.nacks for k, a in got.items() if "PRS" in k[0]) > 0  # PRS で NACK を受けた後のフレームも通っている
+    assert sum(a.nacks for k, a in got.items() if "RPS" in k[0]) > 0  # RPS で NACK を受けた後のフレームも通っている
 
 
 def test_layout_cache_reuses_identical_indices():

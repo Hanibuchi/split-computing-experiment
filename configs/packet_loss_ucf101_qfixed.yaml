@@ -16,7 +16,7 @@
 #   ほかの比較をしたいときは、方式を足す（例）:
 #     - {name: D+DZ+Cmax, scheme: dpcm, p_quant: dz, clip: max}                          # R = max|x|（クリップしない）
 #     - {name: D+DZ+QI2, scheme: dpcm, p_quant: dz, p_step: intra, p_step_scale: 2.0}    # q = I フレームの q × 2
-#     - {name: D+DZ+QI+PRS, scheme: dpcm, p_quant: dz, p_step: intra, prs: true, feedback_delay: 1}  # q 固定 + PRS
+#     - {name: D+DZ+QI+RPS, scheme: dpcm, p_quant: dz, p_step: intra, rps: true, feedback_delay: 1}  # q 固定 + RPS
 #
 #   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_qfixed.yaml
 #   図:   python scripts/packet_loss_plot.py runs/packet_loss_ucf101_qfixed_<日時>

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1270 1000" width="1270" height="1000" font-family="Helvetica, Arial, sans-serif" font-size="15">
-  <!-- D+DZ+PRS のシステム全体図。Shiba et al. (IEEE Access 2026) の FIGURE 1 と同じ構成・配色で、PRS で加わるブロック（薄紫）と NACK を書き足したもの -->
+  <!-- D+DZ+RPS のシステム全体図。Shiba et al. (IEEE Access 2026) の FIGURE 1 と同じ構成・配色で、RPS で加わるブロック（薄紫）と NACK を書き足したもの -->
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#222"/>
@@ -11,7 +11,7 @@
       .box { stroke-width: 1.3; }
       .ln { fill: none; stroke: #222; stroke-width: 1.4; }
       .dash { fill: none; stroke: #777; stroke-width: 1.4; stroke-dasharray: 6 4; }
-      .prs { fill: #e8dcf5; stroke: #8e6bbf; stroke-width: 1.3; }
+      .rps { fill: #e8dcf5; stroke: #8e6bbf; stroke-width: 1.3; }
       .m { font-family: 'Times New Roman', 'STIX Two Text', serif; font-style: italic; font-size: 18px; }
       .title { font-size: 21px; font-weight: bold; }
     </style>
@@ -79,9 +79,9 @@
   <rect x="185" y="762" width="170" height="52" fill="#ccf5de" stroke="#2e9d5b" class="box"/>
   <text x="270" y="793" text-anchor="middle">Buffer</text>
 
-  <!-- PRS: Buffer から壊れていない参照フレームを選ぶ -->
+  <!-- RPS: Buffer から壊れていない参照フレームを選ぶ -->
   <path d="M270,814 V858" class="dash" marker-end="url(#arrG)"/>
-  <rect x="185" y="858" width="170" height="48" class="prs"/>
+  <rect x="185" y="858" width="170" height="48" class="rps"/>
   <text x="270" y="887" text-anchor="middle">Reference Selection</text>
   <path d="M355,882 H530 V324 H507" class="dash" marker-end="url(#arrG)"/>
   <path d="M530,646 H507" class="dash" marker-end="url(#arrG)"/>
@@ -98,10 +98,10 @@
   <path d="M750,400 H953" class="ln" marker-end="url(#arr)"/>
   <text x="800" y="389" class="m" font-size="16">Q(δ′<tspan baseline-shift="sub" font-size="12">t</tspan>), Q(f<tspan baseline-shift="sub" font-size="12">t</tspan>)</text>
 
-  <!-- PRS: ロスの検出 -->
+  <!-- RPS: ロスの検出 -->
   <circle cx="772" cy="400" r="3" fill="#222"/>
   <path d="M772,400 V882 H803" class="ln" marker-end="url(#arr)"/>
-  <rect x="805" y="858" width="130" height="48" class="prs"/>
+  <rect x="805" y="858" width="130" height="48" class="rps"/>
   <text x="870" y="887" text-anchor="middle">Loss Detection</text>
 
   <rect x="955" y="376" width="150" height="48" fill="#dde3ff" stroke="#7b83d6" class="box"/>

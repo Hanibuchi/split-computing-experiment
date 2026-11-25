@@ -29,9 +29,11 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
+from splitcomp.config import upgrade_legacy_rps_name  # noqa: E402
+
 # 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
-SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25",
-           "D+DZ+Cmax", "D+DZ+QI", "D+DZ+QI0.5", "D+DZ+QI2", "D+DZ+QI+PRS"]
+SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+RPS", "D+DZ+RPS3", "D+DZ+FEC10", "D+DZ+FEC25",
+           "D+DZ+Cmax", "D+DZ+QI", "D+DZ+QI0.5", "D+DZ+QI2", "D+DZ+QI+RPS"]
 SCHEME_STYLE = {
     "F+Sym": {"color": "#2a78d6", "marker": "o"},
     "D+Sym": {"color": "#1baf7a", "marker": "^"},
@@ -39,15 +41,15 @@ SCHEME_STYLE = {
     "D+DZ+R": {"color": "#c2185b", "marker": "s"},
     "D+DZ+S2": {"color": "#7b4fd6", "marker": "v"},  # 多系列 DPCM（2 系列）
     "D+DZ+S5": {"color": "#6d4c41", "marker": "P"},  # 多系列 DPCM（5 系列）
-    "D+DZ+PRS": {"color": "#00897b", "marker": "X"},  # PRS（NACK が 1 フレーム後に届く）
-    "D+DZ+PRS3": {"color": "#5c6bc0", "marker": "*"},  # PRS（NACK が 3 フレーム後に届く）
+    "D+DZ+RPS": {"color": "#00897b", "marker": "X"},  # RPS（NACK が 1 フレーム後に届く）
+    "D+DZ+RPS3": {"color": "#5c6bc0", "marker": "*"},  # RPS（NACK が 3 フレーム後に届く）
     "D+DZ+FEC10": {"color": "#e53935", "marker": "h"},  # FEC（パリティ 10%）
     "D+DZ+FEC25": {"color": "#546e7a", "marker": "p"},  # FEC（パリティ 25%）
     "D+DZ+Cmax": {"color": "#008300", "marker": "d"},  # 範囲 R = max|x|（クリップしない）
     "D+DZ+QI": {"color": "#e34948", "marker": "o", "linestyle": "--"},  # P フレームの q を I フレームの q に固定
     "D+DZ+QI0.5": {"color": "#e87ba4", "marker": "v", "linestyle": "--"},  # 同（q × 0.5）
     "D+DZ+QI2": {"color": "#6250d6", "marker": "^", "linestyle": "--"},  # 同（q × 2）
-    "D+DZ+QI+PRS": {"color": "#eb6834", "marker": "X", "linestyle": "--"},  # q 固定 + PRS
+    "D+DZ+QI+RPS": {"color": "#eb6834", "marker": "X", "linestyle": "--"},  # q 固定 + RPS
 }
 # ビット数・損失モデル用の色（固定の順に使う）
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]
@@ -78,6 +80,9 @@ plt.rcParams.update({
 def load(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """results と gop_curve を読む。gop_curve には results の loss_model / loss_p を付ける。"""
     df = pd.read_csv(run_dir / "results.csv")
+    # 旧名（prs 列・D+DZ+PRS など）の結果は RPS の名前に読み替える
+    df = df.rename(columns={"prs": "rps"}) if "rps" not in df else df
+    df["scheme"] = df["scheme"].map(upgrade_legacy_rps_name)
     df["loss_p"] = df["loss_p"].astype(float)
     df["num_elements"] = df["feature_shape"].map(lambda s: math.prod(int(v) for v in str(s).split("x")))
     # エントロピー符号化した場合の 1 フレームあたりの送信量（参考値）
@@ -90,6 +95,7 @@ def load(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     gop = None
     if gop_path.exists():
         gop = pd.read_csv(gop_path)
+        gop["scheme"] = gop["scheme"].map(upgrade_legacy_rps_name)
         loss_map = df[["loss", "loss_model", "loss_p"]].drop_duplicates("loss")
         gop = gop.merge(loss_map, on="loss", how="left")
     return df, gop

@@ -21,6 +21,7 @@ list や値は丸ごと置き換える（例: configs/packet_loss_ucf101_quick.y
 from __future__ import annotations
 
 import dataclasses
+import re
 import types
 import typing
 from dataclasses import dataclass, field
@@ -187,10 +188,10 @@ class TemporalSchemeConfig:
     #: 系列数 n。P フレームが n フレーム前（GoP 内の位置 n 未満は GoP 先頭の I フレーム）を参照する。
     #: フレームが n 本の独立な系列に分かれ、ロスの伝搬がその系列に閉じる（例: D+DZ+S2）。1 で通常の DPCM。fd では使わない。
     streams: int = 1
-    #: PRS（Reference Picture Selection）。クラウドが壊れたフレームの番号だけを NACK で返し、端末はクラウド側で壊れていない
-    #: フレームを参照して符号化する（例: D+DZ+PRS）。fd では使わない。
-    prs: bool = False
-    #: PRS の NACK が端末に届くまでのフレーム数 d（フレーム t の NACK は t + d を符号化する前に届く。1 以上）。
+    #: RPS（Reference Picture Selection）。クラウドが壊れたフレームの番号だけを NACK で返し、端末はクラウド側で壊れていない
+    #: フレームを参照して符号化する（例: D+DZ+RPS）。fd では使わない。
+    rps: bool = False
+    #: RPS の NACK が端末に届くまでのフレーム数 d（フレーム t の NACK は t + d を符号化する前に届く。1 以上）。
     feedback_delay: int = 1
     #: FEC（パケット単位の消失訂正, Reed-Solomon 相当）のパリティの比率 r。各フレームのデータ k パケットに
     #: パリティ m = ceil(r·k) パケットを付け、落ちた数が m 以下ならフレーム全体を復元する（例: D+DZ+FEC10）。0 で FEC なし。
@@ -208,6 +209,51 @@ class TemporalSchemeConfig:
     p_step: str = "intra"
     #: p_step="intra" のときの倍率（大きいほど P フレームが粗くなり、送信量が減る）。
     p_step_scale: float = 1.0
+
+
+# 旧名 PRS の互換: RPS（Reference Picture Selection）は以前、頭文字を取り違えて「PRS」と書いていた。
+# その頃の設定（prs: true）や結果（prs 列・D+DZ+PRS などの方式名）も読めるように、新しい名前に読み替える。
+_LEGACY_RPS_TOKEN = re.compile(r"(?<![A-Za-z])PRS(?![A-Za-z])")
+
+
+def upgrade_legacy_rps_name(name: str) -> str:
+    """旧名の方式名（"D+DZ+PRS" / "D+DZ+PRS3" / "D+DZ+QI+PRS" など）を RPS の名前に読み替える。それ以外はそのまま返す。"""
+    return _LEGACY_RPS_TOKEN.sub("RPS", name) if isinstance(name, str) else name
+
+
+def upgrade_legacy_rps_row(row: dict) -> dict:
+    """旧版の結果の 1 行（results / gop_curve）を新しい名前に読み替えた dict を返す（列の順は保つ）。
+
+    - 列 "prs" → "rps"
+    - scheme 列の "PRS" → "RPS"（prs 列が無い gop_curve の行も、方式名だけ読み替える）
+    """
+    out = {}
+    for k, v in row.items():
+        if k == "prs" and "rps" not in row:
+            out["rps"] = v
+        elif k == "scheme":
+            out[k] = upgrade_legacy_rps_name(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _upgrade_legacy_scheme(data: dict) -> dict:
+    """旧名の方式の設定（prs: true）を新しい名前（rps: true、方式名の PRS → RPS）に読み替える。
+
+    方式名は prs キーの有無によらず読み替える（結果の行やチェックポイントのキーの読み替えと必ずそろえるため）。
+    """
+    data = dict(data)  # 呼び出し元の dict は書き換えない
+    if "prs" in data:
+        if "rps" in data:
+            raise KeyError(f"方式 {data.get('name')!r} の設定に prs（旧名）と rps が両方あります。rps だけにしてください")
+        data = {("rps" if k == "prs" else k): v for k, v in data.items()}
+    if "name" in data:
+        new = upgrade_legacy_rps_name(data["name"])
+        if new != data["name"]:
+            print(f"方式名 {data['name']!r} を {new!r} に読み替えます（PRS は RPS の旧名）")
+            data["name"] = new
+    return data
 
 
 @dataclass
@@ -450,6 +496,8 @@ def from_dict(cls: type[T], data: dict) -> T:
     """dict から dataclass を再帰的に構築する。未知のキーがあればエラーにする（タイプミス検出のため）。"""
     if not isinstance(data, dict):
         raise TypeError(f"{cls.__name__} には dict が必要ですが {type(data).__name__} が渡されました")
+    if cls is TemporalSchemeConfig:
+        data = _upgrade_legacy_scheme(data)  # 旧名 prs の設定（以前の実行フォルダの config.yaml など）も読めるようにする
     hints = typing.get_type_hints(cls)
     names = {f.name for f in dataclasses.fields(cls)}
     unknown = set(data) - names

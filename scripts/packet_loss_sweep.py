@@ -10,16 +10,16 @@ Split Computing on Video Streams," IEEE Access, 2026（パケットロスは同�
 方式に restorer（scripts/train_restorer.py で学習したロス補修 net）を指定すると、クラウド側で欠けた要素を補ってから
 tail に渡す（例: D+DZ+R）。方式に streams: n を指定すると、P フレームが n フレーム前を参照する多系列 DPCM になり、
 ロスの伝搬が n 本の系列のうち 1 本に閉じる（例: D+DZ+S2 / D+DZ+S5）。
-方式に prs: true を指定すると PRS（Reference Picture Selection）になる: クラウドはパケットが落ちたフレームの番号だけを
+方式に rps: true を指定すると RPS（Reference Picture Selection）になる: クラウドはパケットが落ちたフレームの番号だけを
 NACK として返し（feedback_delay フレーム後に端末に届く）、端末はクラウド側で壊れていないフレームを参照して符号化する
-（例: D+DZ+PRS / D+DZ+PRS3）。フィードバックは壊れたフレームの番号だけなので、端末→クラウドの送信量は増えない。
+（例: D+DZ+RPS / D+DZ+RPS3）。フィードバックは壊れたフレームの番号だけなので、端末→クラウドの送信量は増えない。
 方式に fec: r を指定すると FEC（パケット単位の消失訂正, Reed-Solomon 相当）になる: 各フレームのデータ k パケットに
 パリティ m = ceil(r·k) パケットを付けて送り、落ちた数が m 以下ならクラウドでフレーム全体を復元する（例: D+DZ+FEC10 / D+DZ+FEC25）。
 
 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）はロスによらないので、
 クリップごとに (方式, ビット数) ごとに 1 回だけ行い、その結果を全ての損失条件・シードで使い回す。
-ただし PRS は端末の符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う（:func:`prs_clip`）。
-PRS でフィードバックによって符号化し直したフレームのパケット分割は、量子化インデックスが同じなら損失条件をまたいで使い回す。
+ただし RPS は端末の符号化がフィードバック（= ロス）に依存するので、条件ごとに符号化と復号を交互に行う（:func:`rps_clip`）。
+RPS でフィードバックによって符号化し直したフレームのパケット分割は、量子化インデックスが同じなら損失条件をまたいで使い回す。
 
 並列化: 1 クリップの (方式, ビット数) 1 組を 1 タスクとして、ワーカープロセス（--workers。既定はジョブに割り当てられた
 コア数 = os.sched_getaffinity）で並列に処理する（:func:`_run_task`）。各ワーカーは torch を 1 スレッドで動かし、
@@ -48,13 +48,13 @@ tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 の�
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml data.kwargs.num_clips=2 'seeds=[0]'
 
     # 新手法を試す段階: 条件を減らしたお試し設定（2 モデル・Gilbert-Elliott のみ）。--scheme で方式も絞れる
-    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+RPS
 
     # 多系列 DPCM（2 系列・5 系列）を通常の D+DZ と比べる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+S2 --scheme D+DZ+S5
 
-    # PRS（フィードバック遅延 1 / 3 フレーム）を通常の D+DZ と比べる
-    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS --scheme D+DZ+PRS3
+    # RPS（フィードバック遅延 1 / 3 フレーム）を通常の D+DZ と比べる
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+RPS --scheme D+DZ+RPS3
 
     # モデルごとに別々に実行する（時間制限のある計算機向け）。結果は scripts/merge_results.py でまとめる
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets
@@ -94,7 +94,14 @@ import torch
 
 from splitcomp.builder import build_split
 from splitcomp.cli import parse_cli
-from splitcomp.config import PacketLossConfig, TemporalSchemeConfig, load_config, to_dict
+from splitcomp.config import (
+    PacketLossConfig,
+    TemporalSchemeConfig,
+    load_config,
+    to_dict,
+    upgrade_legacy_rps_name,
+    upgrade_legacy_rps_row,
+)
 from splitcomp.data import build_dataset
 from splitcomp.metrics import ResultWriter, make_run_dir, save_run_info
 from splitcomp.temporal import (
@@ -123,9 +130,9 @@ class _Accumulator:
         self.packets = 0
         self.bytes = 0
         self.entropy = 0.0
-        #: PRS: クラウドが返した NACK の数（フィードバックの量）
+        #: RPS: クラウドが返した NACK の数（フィードバックの量）
         self.nacks = 0
-        #: PRS: 参照できる無事なフレームが無く I フレームにした回数
+        #: RPS: 参照できる無事なフレームが無く I フレームにした回数
         self.forced_intra = 0
         #: FEC: 送ったパリティのパケット数
         self.parity_packets = 0
@@ -166,8 +173,8 @@ class EncodedClip:
         self.bits = bits
 
 
-def make_encoder(cfg, scheme, bits, prs: bool = False) -> TemporalEncoder:
-    """方式の設定から端末側の符号化器を作る（prs=True なら NACK を受けて参照を選ぶ）。"""
+def make_encoder(cfg, scheme, bits, rps: bool = False) -> TemporalEncoder:
+    """方式の設定から端末側の符号化器を作る（rps=True なら NACK を受けて参照を選ぶ）。"""
     return TemporalEncoder(
         scheme.scheme,
         bits,
@@ -175,7 +182,7 @@ def make_encoder(cfg, scheme, bits, prs: bool = False) -> TemporalEncoder:
         scheme.p_quant,
         clip=scheme.clip,
         streams=scheme.streams,
-        prs=prs,
+        rps=rps,
         p_step=scheme.p_step,
         p_step_scale=scheme.p_step_scale,
     )
@@ -262,7 +269,7 @@ class _CondResult:
 
 
 def _apply(acc: _Accumulator, res: _CondResult, cfg) -> None:
-    """1 クリップ × 1 条件の結果を集計値に足し込む（以前の版の decode_clip / prs_clip / _score と同じ順序で足す）。"""
+    """1 クリップ × 1 条件の結果を集計値に足し込む（以前の版の decode_clip / rps_clip / _score と同じ順序で足す）。"""
     for name in _COUNT_FIELDS:
         setattr(acc, name, getattr(acc, name) + res.counts[name])
     acc.max_frame_bytes = max(acc.max_frame_bytes, res.counts["max_frame_bytes"])
@@ -349,13 +356,13 @@ def _layout_cached(idx: torch.Tensor, bits: int, cfg, cache: dict | None) -> tup
 
 
 @torch.no_grad()
-def _prs_recon(
+def _rps_recon(
     feats, cfg, scheme, bits, loss_cfg, seed, clip, acc: _Accumulator, restorer=None, encoded: EncodedClip | None = None, layout_cache: dict | None = None
 ):
-    """PRS で 1 クリップを符号化・ロス・復号し、(復元した特徴, フレームごとのエントロピーの list) を返す（:func:`prs_clip` の本体）。"""
+    """RPS で 1 クリップを符号化・ロス・復号し、(復元した特徴, フレームごとのエントロピーの list) を返す（:func:`rps_clip` の本体）。"""
     T = feats.shape[0]
     loss = build_loss_model(loss_cfg, _clip_seed(seed, clip))
-    enc = make_encoder(cfg, scheme, bits, prs=True)
+    enc = make_encoder(cfg, scheme, bits, rps=True)
     dec = TemporalDecoder(cfg.concealment, restorer=restorer.restore if restorer is not None else None)
     arriving: dict[int, list[int]] = defaultdict(list)  # 端末に届くフレーム番号 → その時に届く NACK（壊れたフレームの番号）
 
@@ -380,7 +387,7 @@ def _prs_recon(
     return recon, entropies
 
 
-def prs_clip(
+def rps_clip(
     feats,
     ref_pred,
     tail,
@@ -396,7 +403,7 @@ def prs_clip(
     encoded: EncodedClip | None = None,
     layout_cache: dict | None = None,
 ) -> None:
-    """PRS で 1 クリップを符号化・ロス・復号し、tail を通して acc に加算する（端末とクラウドを 1 フレームずつ交互に動かす閉ループ）。
+    """RPS で 1 クリップを符号化・ロス・復号し、tail を通して acc に加算する（端末とクラウドを 1 フレームずつ交互に動かす閉ループ）。
 
     フレーム t のパケットが 1 つでも落ちると、クラウドは t の NACK を返し、端末はフレーム t + feedback_delay を符号化する前に受け取る。
     フィードバック路ではロスは起きないとする。損失の乱数の使い方は :func:`decode_clip` と同じ（クリップとシードで決まり、
@@ -410,7 +417,7 @@ def prs_clip(
     scheme.fec > 0 なら FEC を併用し、FEC で復元できなかったフレームだけ NACK を返す。
     """
     part = _Accumulator(cfg.gop)
-    recon, entropies = _prs_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
+    recon, entropies = _rps_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
     (res,) = _evaluate([(part, recon, entropies)], feats, ref_pred, tail, tail_dev)
     _apply(acc, res, cfg)
 
@@ -450,7 +457,7 @@ def _init_worker(cfg, tail, tail_dev, restorers: dict, conditions: list, threads
 def _run_task(clip: int, scheme_index: int, bits: int, feats, ref_pred) -> list[_CondResult]:
     """1 クリップの (方式, ビット数) 1 組を、全ての損失条件・シードについて処理し、条件の順に結果を返す。
 
-    符号化（損失条件によらないので 1 回）→ 条件ごとの復号（PRS は符号化と復号を交互に行う閉ループ）→ tail（全条件まとめて 1 回）。
+    符号化（損失条件によらないので 1 回）→ 条件ごとの復号（RPS は符号化と復号を交互に行う閉ループ）→ tail（全条件まとめて 1 回）。
     """
     w = _WORKER
     cfg = w["cfg"]
@@ -467,13 +474,13 @@ def _run_task(clip: int, scheme_index: int, bits: int, feats, ref_pred) -> list[
     if enc_key in w["reused_encodings"]:
         encodings[enc_key] = encoded
 
-    # PRS で NACK を受けた後のフレームのパケット分割を、損失条件の間で使い回す
-    layout_cache = {} if scheme.prs else None
+    # RPS で NACK を受けた後のフレームのパケット分割を、損失条件の間で使い回す
+    layout_cache = {} if scheme.rps else None
     parts = []
     for loss_cfg, seed in w["conditions"]:
         part = _Accumulator(cfg.gop)
-        if scheme.prs:
-            recon, entropies = _prs_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
+        if scheme.rps:
+            recon, entropies = _rps_recon(feats, cfg, scheme, bits, loss_cfg, seed, clip, part, restorer, encoded, layout_cache)
         else:
             recon, entropies = _decode_recon(encoded, feats, cfg, loss_cfg, seed, clip, part, restorer, scheme.fec)
         parts.append((part, recon, entropies))
@@ -542,6 +549,7 @@ def select_schemes(schemes: list, names: list[str] | None) -> list:
     """
     if not names:
         return list(schemes)
+    names = [upgrade_legacy_rps_name(n) for n in names]  # 旧名（D+DZ+PRS など）で指定しても受け付ける
     known = {s.name for s in schemes}
     unknown = [n for n in names if n not in known]
     if unknown:
@@ -597,12 +605,15 @@ def finished_targets(run_dir: Path, cfg: PacketLossConfig) -> set[str]:
 
 
 def prune_unfinished(run_dir: Path, done: set[str]) -> None:
-    """results / gop_curve の jsonl から、終わっていない target の行と壊れた行を取り除く（やり直す分の重複を防ぐ）。"""
+    """results / gop_curve の jsonl から、終わっていない target の行と壊れた行を取り除く（やり直す分の重複を防ぐ）。
+
+    旧名（prs 列・D+DZ+PRS など）の行は、ここで RPS の名前に読み替える（再開後の行と名前をそろえるため）。
+    """
     for name in ("results", "gop_curve"):
         path = run_dir / f"{name}.jsonl"
         if not path.exists():
             continue
-        rows = [r for r in _read_jsonl(path) if _row_target(r) in done]
+        rows = [upgrade_legacy_rps_row(r) for r in _read_jsonl(path) if _row_target(r) in done]
         tmp = path.with_suffix(".jsonl.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
@@ -643,7 +654,8 @@ def load_checkpoint(run_dir: Path, target, num_clips: int, gop: int) -> tuple[in
     for key, fields in state["accs"].items():
         acc = _Accumulator(gop)
         vars(acc).update(fields)
-        accs[key] = acc
+        # キーは (方式名, ビット数, 損失条件, シード)。旧名の方式名（D+DZ+PRS など）は RPS の名前に読み替える
+        accs[(upgrade_legacy_rps_name(key[0]), *key[1:])] = acc
     return state["next_clip"], state["shape"], accs
 
 
@@ -696,9 +708,12 @@ def main() -> None:
             args.overrides = [o for o in args.overrides if o.startswith("devices.")]
             cfg = resume_config(args.resume, args.overrides)
             group_run_dir = None
+    dup = sorted({s.name for s in cfg.schemes if [t.name for t in cfg.schemes].count(s.name) > 1})
+    if dup:  # 集計のキーが方式名なので、同じ名前があると結果が混ざる（旧名 PRS の読み替えで重なった場合も含む）
+        raise SystemExit(f"方式名が重複しています: {dup}")
     for s in cfg.schemes:
-        if s.prs and (s.scheme == "fd" or s.feedback_delay < 1):
-            raise SystemExit(f"方式 {s.name}: prs は fd 以外で、feedback_delay は 1 以上にしてください")
+        if s.rps and (s.scheme == "fd" or s.feedback_delay < 1):
+            raise SystemExit(f"方式 {s.name}: rps は fd 以外で、feedback_delay は 1 以上にしてください")
         if s.fec < 0:
             raise SystemExit(f"方式 {s.name}: fec（パリティの比率）は 0 以上にしてください: {s.fec}")
         if s.restorer and not Path(s.restorer).exists():
@@ -749,7 +764,7 @@ def main() -> None:
         print(f"{name}: ロス補修 net を使います（学習条件: {r.meta}）")
 
     # 複数の方式で同じになる符号化（方式, P の量子化, 系列数, ビット数）。1 プロセスで動かすときは、クリップごとに 1 回だけ符号化して
-    # 使い回す（PRS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
+    # 使い回す（RPS も、NACK を受けるまではフィードバックなしと同じ符号化なので、その分を使い回す）
     enc_count = Counter(encoding_key(s, b) for s in cfg.schemes for b in cfg.bits)
     reused_encodings = frozenset(key for key, n in enc_count.items() if n > 1)
 
@@ -764,8 +779,8 @@ def main() -> None:
 
     # 1 クリップのタスク = (方式の番号, ビット数)。結果はこの順（以前の版のループの順）に足し込む
     tasks = [(si, bits) for si in range(len(cfg.schemes)) for bits in cfg.bits]
-    # 投入は重い PRS（損失条件ごとに符号化し直す）から先にする（待ち時間を減らすため。結果の順には影響しない）
-    submit_order = sorted(range(len(tasks)), key=lambda i: not cfg.schemes[tasks[i][0]].prs)
+    # 投入は重い RPS（損失条件ごとに符号化し直す）から先にする（待ち時間を減らすため。結果の順には影響しない）
+    submit_order = sorted(range(len(tasks)), key=lambda i: not cfg.schemes[tasks[i][0]].rps)
 
     with ResultWriter(run_dir) as writer, ResultWriter(run_dir, "gop_curve") as curve_writer:
         for target in cfg.targets:
@@ -878,8 +893,8 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "scheme": scheme,
                 "bits": bits,
                 "streams": sc.streams,  # 多系列 DPCM の系列数（1 = 通常）
-                "prs": sc.prs,  # NACK による参照フレーム選択（PRS）
-                "feedback_delay": sc.feedback_delay if sc.prs else None,  # NACK が届くまでのフレーム数
+                "rps": sc.rps,  # NACK による参照フレーム選択（RPS）
+                "feedback_delay": sc.feedback_delay if sc.rps else None,  # NACK が届くまでのフレーム数
                 "fec_rate": sc.fec,  # FEC のパリティの比率 r（0 = FEC なし）
                 "clip": sc.clip,  # 量子化の範囲 R の決め方（p99 / max）
                 # P フレームの q の決め方（adaptive / intra）。fd は P フレームが無いので空欄
@@ -902,7 +917,7 @@ def _summarize(cfg: PacketLossConfig, target, shape, accs) -> tuple[list[dict], 
                 "packets_per_frame": sum(a.packets for a in group) / frames,
                 "bytes_per_frame": sum(a.bytes for a in group) / frames,
                 "entropy_bpe": sum(a.entropy for a in group) / frames,
-                # PRS のフィードバック: 1 フレームあたりの NACK 数（NACK 1 つ = 壊れたフレームの番号 u32）と強制 I フレーム数
+                # RPS のフィードバック: 1 フレームあたりの NACK 数（NACK 1 つ = 壊れたフレームの番号 u32）と強制 I フレーム数
                 "nacks_per_frame": sum(a.nacks for a in group) / frames,
                 "forced_intra_per_frame": sum(a.forced_intra for a in group) / frames,
                 # FEC: 1 フレームあたりのパリティのパケット数と、FEC で復元した後のデータパケットの損失率

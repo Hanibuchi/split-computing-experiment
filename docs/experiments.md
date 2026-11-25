@@ -146,8 +146,8 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
   - サブ: **Gilbert-Elliott**（平均バースト長 4 パケットのバーストロス）
   - ロス率はどちらも p = 0.01, 0.02, 0.05, 0.1, 0.2（と基準の p = 0）。フレーム単位のロス（`frame`）は実装はあるが、メイン実験では使わない
 - **扱わない項目**: 帯域・遅延・deadline。パケットロス実験の結果（一致率・送信量）はこれらに依存しないので、設定にも出てこない。
-  PRS の NACK の遅れもフレーム数 `feedback_delay: d` だけで表す
-- 独自の方式として、多系列 DPCM（D+DZ+S2 / S5）、PRS（D+DZ+PRS / PRS3）、FEC（D+DZ+FEC10 / FEC25）を比べる。
+  RPS の NACK の遅れもフレーム数 `feedback_delay: d` だけで表す
+- 独自の方式として、多系列 DPCM（D+DZ+S2 / S5）、RPS（D+DZ+RPS / RPS3）、FEC（D+DZ+FEC10 / FEC25）を比べる。
   ロス補修 net（D+DZ+R）はメイン実験には入れていない（試すときは方式に足す。下の「ロス補修 net」を参照）
 - P フレームの量子化幅は既定の `p_step: intra`（I フレームの q に固定）。論文（式 (9)、Table 8）は P フレームごとに q を
   決め直す設定（adaptive）で、しかも対称量子化なので、ロスなしの一致率は Table 8 と完全には一致しない
@@ -162,7 +162,7 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
    - 本番の設定を `base:` で読み、モデルを resnet50 / vgg16 の 2 つ、損失を Gilbert-Elliott（と基準の no_loss）だけに減らしたもの。
      方式・ビット数・クリップ数・シードは本番と同じ（方式を足すときは本番の設定に書けば、お試し側にも反映される）
    - 損失・シードの組は 31 → 16 通り。結果は `runs/packet_loss_ucf101_quick_<日時>/` に出るので本番と混ざらない
-   - `--scheme D+DZ --scheme D+DZ+PRS` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
+   - `--scheme D+DZ --scheme D+DZ+RPS` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
 4. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
    （時間がかかるので、ssh で動かすなら tmux の中で。Slurm クラスタでは下の「Slurm クラスタで動かす」を参照）
 
@@ -183,7 +183,7 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
     足りなければ `--workers` を減らす
   - tail が cuda / mps のとき、および `--workers 1` のときは、ワーカーを使わず 1 プロセスで順に処理する
   - 使ったワーカー数は起動時に表示され、`meta.json` の `workers` に残る
-- PRS で NACK を受けた後のフレームのパケット分割は、量子化インデックスが同じなら損失条件の間で使い回す
+- RPS で NACK を受けた後のフレームのパケット分割は、量子化インデックスが同じなら損失条件の間で使い回す
 - torch の CPU スレッド数は、ジョブに割り当てられたコア数（`os.sched_getaffinity`）を超えないように自動で調整する
   （torch の既定はマシン全体のコア数なので、割り当てが一部だけだとスレッドが多すぎて遅くなる）。
   使ったスレッド数は起動時に表示され、`meta.json` の `cpu_threads` に残る。手動で決めたいときは `OMP_NUM_THREADS=8 python ...`
@@ -467,12 +467,12 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 - `gop_curve.csv` で GoP 内の位置ごとの劣化の様子（D+DZ のような後半ほどの悪化が緩やかになるか）
 - バースト（Gilbert-Elliott）では連続するフレームが別の系列に入るので、1 系列あたりのロスが分散される効果がどれだけあるか
 
-### PRS: 壊れたフレームの番号だけを返す参照フレーム選択（D+DZ+PRS / D+DZ+PRS3）
+### RPS: 壊れたフレームの番号だけを返す参照フレーム選択（D+DZ+RPS / D+DZ+RPS3）
 
-仕組みの詳しい解説（具体例・実測例・前提）は [d_dz_prs.md](d_dz_prs.md) を参照。
+仕組みの詳しい解説（具体例・実測例・前提）は [d_dz_rps.md](d_dz_rps.md) を参照。
 
 動画符号化の Reference Picture Selection（NACK モード）を応用したもの。D+DZ は端末がロスを知らないので、ロスが次の I フレームまで伝搬します。
-PRS では、クラウドが **パケットが 1 つでも落ちたフレームの番号だけ** を NACK として端末に返します（届いたフレームには何も返さない）。
+RPS では、クラウドが **パケットが 1 つでも落ちたフレームの番号だけ** を NACK として端末に返します（届いたフレームには何も返さない）。
 端末は NACK を受け取ったら、それ以降のフレームを **クラウド側で壊れていないフレーム** を参照して符号化するので、
 伝搬は NACK が届くまでの数フレームで止まります。返すのは壊れたフレームの番号（数バイト）だけなので、端末→クラウドの送信量は増えません。
 
@@ -491,16 +491,16 @@ PRS では、クラウドが **パケットが 1 つでも落ちたフレーム�
   それも無ければ（GoP 先頭の I フレームが壊れたとき）そのフレームを I フレームにする（送信量は実際の I フレーム分で数える）
 - 参照先 t − ref はパケットヘッダの「種類」u8 の残り 7 ビットに入れる想定なので、ヘッダは増えない
 - ロスがなければ D+DZ と全く同じ符号化・結果になる。多系列（`streams`）や restorer（`restorer`）とも組み合わせられる
-- 設定は方式の `prs: true` と `feedback_delay: d`（`configs/packet_loss_ucf101.yaml` に D+DZ+PRS（d=1）/ D+DZ+PRS3（d=3）がある）。
-  Python からは `TemporalEncoder(..., prs=True)` を作り、NACK を `enc.nack(t)` で渡す（復号器は各フレームの `ref` を見るので変更不要）
-- 端末の符号化がロスに依存するので、PRS だけは損失条件ごとに符号化と復号を交互に行う（`prs_clip`）。
+- 設定は方式の `rps: true` と `feedback_delay: d`（`configs/packet_loss_ucf101.yaml` に D+DZ+RPS（d=1）/ D+DZ+RPS3（d=3）がある）。
+  Python からは `TemporalEncoder(..., rps=True)` を作り、NACK を `enc.nack(t)` で渡す（復号器は各フレームの `ref` を見るので変更不要）
+- 端末の符号化がロスに依存するので、RPS だけは損失条件ごとに符号化と復号を交互に行う（`rps_clip`）。
   今の GoP で NACK を受ける前のフレームはフィードバックなしと同じ符号化なので、そのパケット分割を使い回す（結果は完全に一致する）。
   それでもロスの多い条件では D+DZ より時間がかかる
-- 結果の列: `prs`, `feedback_delay`, `nacks_per_frame`（1 フレームあたりの NACK 数 = フィードバックの量。1 つ = フレーム番号 u32）,
+- 結果の列: `rps`, `feedback_delay`, `nacks_per_frame`（1 フレームあたりの NACK 数 = フィードバックの量。1 つ = フレーム番号 u32）,
   `forced_intra_per_frame`（参照できる無事なフレームが無く I フレームにした回数）
 
 ```bash
-python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS --scheme D+DZ+PRS3
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+RPS --scheme D+DZ+RPS3
 ```
 
 確認ポイント:
@@ -526,8 +526,8 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
   - **Gilbert-Elliott**（バースト）: 1 フレームの中で連続して落ちると、パリティが足りなくなりやすいです
   - パケット数が少ないフレーム（疎な P フレームや 2 ビット）では m が 1 になり、比率 r より冗長になります（切り上げのため）
 - 設定は方式の `fec: r`（`configs/packet_loss_ucf101.yaml` に D+DZ+FEC10（r=0.1）/ D+DZ+FEC25（r=0.25）がある）。
-  符号化は D+DZ と同じなので、パケット分割は D+DZ のものを使い回します。PRS（`prs: true`）や restorer とも組み合わせられます。
-  PRS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返します
+  符号化は D+DZ と同じなので、パケット分割は D+DZ のものを使い回します。RPS（`rps: true`）や restorer とも組み合わせられます。
+  RPS と組み合わせると、FEC で復元できなかったフレームだけ NACK を返します
 - Python からは `fec_parity(k, r)` でパリティ数、`fec_recover(lost, k)` で復元後のデータパケットのロスを求めます（`splitcomp.temporal`）
 - 結果の列:
   - `fec_rate`: パリティの比率 r（0 = FEC なし）
@@ -561,7 +561,7 @@ CONFIG=configs/packet_loss_ucf101_fec.yaml sbatch --array=0-1 scripts/slurm/pack
 確認ポイント:
 - `no_loss` で D+DZ と `agreement` / `feature_mse` が一致し、`bytes_per_frame` だけが約 r 以上増えること（ロスがなくても常にかかる代償）
 - `residual_loss_rate` が `loss_rate` よりどれだけ小さいか。損失率がパリティの比率を超えると急に効かなくなる（崖のような振る舞い）
-- 同じ送信量の増え方で、PRS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
+- 同じ送信量の増え方で、RPS（送信量はほぼ増えない）や多系列 DPCM と比べてどうか（`rate_vs_agreement.png`）
 - frame 損失では D+DZ と同じ agreement になる（効かない）こと
 
 ### P フレームのステップ幅 q（既定は q 固定 = `p_step: intra`）
@@ -588,7 +588,7 @@ adaptive で 0.23（Sym）/ 0.29（DZ）bpe、intra で 1.18 bpe でした（int
 `intra` では、差分が小さいほどインデックスが 0 付近に集まり、送信量が減ります。差分が ±2^(b−1)·q を超えた要素は飽和（クリップ）します。
 
 - q は毎フレームのパケットヘッダで送っているので、復号器は変わりません
-- PRS で P フレームの代わりに I フレームにしたときは、そのフレームの q に切り替えます
+- RPS で P フレームの代わりに I フレームにしたときは、そのフレームの q に切り替えます
 - `clip: max` は範囲 R を max|x| にします（クリップしない）。q 固定の効果が「P99 クリップをやめたこと」から来ていないかを確かめる比較用です
 - Python からは `TemporalEncoder(..., p_step="intra", p_step_scale=1.0)`（指定しなければこれ。決め直すなら `p_step="adaptive"`）、量子化だけなら `quantize(x, bits, mode, step=q)`
 - 結果の列（全ての方式で出る）:
@@ -621,7 +621,7 @@ python scripts/qi_histogram.py --target resnet50 --bits 2 --clip 3 --out figs --
 
 Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 4 つなので、sbatch の既定の `--array=0-3` のまま）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
-今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+PRS などは設定ファイルに例があり、方式を足せば比べられます。
+今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+RPS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm

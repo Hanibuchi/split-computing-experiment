@@ -18,7 +18,7 @@ Split Computing の研究用基盤です。中間特徴の**圧縮**、**通信�
 | 特徴の圧縮 | float32/16/bf16、1〜16 bit 一様量子化（チャネル単位も可）、zlib / lz4。組み合わせ自由・独自方式も追加可能 |
 | 通信 | 帯域・RTT から計算するシミュレーション と、TCP による実ネットワーク通信の両方 |
 | 計測 | head / encode / 通信 / decode / tail の各時間、送信データ量、圧縮率、精度（top-k）、元モデルとの一致度 |
-| 動画・パケットロス | 動画の中間特徴の時系列符号化（FD / DPCM、dead-zone 量子化）を、パケットロス下で評価（メイン実験は Bernoulli、サブで Gilbert-Elliott のバーストロス。フレーム単位のロスも使える）（`scripts/packet_loss_sweep.py`）。UCF-101 は使う動画だけを自動でダウンロードする。モデルごとに分けて実行し、結果をまとめることもできる。途中で止まっても `--resume` で続きから再開できる。ロスの伝搬を系列に閉じる多系列 DPCM（D+DZ+S2 / S5）、クラウドが壊れたフレームの番号だけを返して端末が壊れていないフレームを参照する PRS（D+DZ+PRS）、パリティパケットを付けて受信側でロスを復元する FEC（D+DZ+FEC10 / FEC25, Reed-Solomon 相当）も比較できる。再学習なしでロスを補う、モデル共通のロス補修 net（D+DZ+R, `scripts/train_restorer.py`）も方式に足せる。パケットは常にパケットごとの適応算術符号でエントロピー符号化して送る。P フレームの量子化幅は既定で I フレームと同じに固定する（`p_step: intra`。論文の設定（式 (9)）にするなら `p_step: adaptive`） |
+| 動画・パケットロス | 動画の中間特徴の時系列符号化（FD / DPCM、dead-zone 量子化）を、パケットロス下で評価（メイン実験は Bernoulli、サブで Gilbert-Elliott のバーストロス。フレーム単位のロスも使える）（`scripts/packet_loss_sweep.py`）。UCF-101 は使う動画だけを自動でダウンロードする。モデルごとに分けて実行し、結果をまとめることもできる。途中で止まっても `--resume` で続きから再開できる。ロスの伝搬を系列に閉じる多系列 DPCM（D+DZ+S2 / S5）、クラウドが壊れたフレームの番号だけを返して端末が壊れていないフレームを参照する RPS（D+DZ+RPS）、パリティパケットを付けて受信側でロスを復元する FEC（D+DZ+FEC10 / FEC25, Reed-Solomon 相当）も比較できる。再学習なしでロスを補う、モデル共通のロス補修 net（D+DZ+R, `scripts/train_restorer.py`）も方式に足せる。パケットは常にパケットごとの適応算術符号でエントロピー符号化して送る。P フレームの量子化幅は既定で I フレームと同じに固定する（`p_step: intra`。論文の設定（式 (9)）にするなら `p_step: adaptive`） |
 | 論文の再現検証 | Shiba et al. (IEEE Access 2026) の表・図（Table 3, 5–13, Fig. 4–11）を同じ条件で計算し、論文の値と並べて一致・不一致を判定する報告書と図を作る（`scripts/verify_shiba.py`） |
 | 学習 | 分割点にエンコーダ / デコーダ（ボトルネック）を挿入し、元モデルからの知識蒸留で学習 |
 | タスク非依存 | 分類以外のモデルでも動作（出力が dict のリストでも可）。指標は関数を渡して追加できる |
@@ -64,7 +64,7 @@ Python から直接使う最小例は [`examples/quickstart.py`](examples/quicks
 | [docs/architecture.md](docs/architecture.md) | 全体の構成と処理の流れ、各モジュール・クラスの役割 |
 | [docs/extending.md](docs/extending.md) | 独自モデル・データセット・圧縮方式・評価指標・損失の追加方法 |
 | [docs/experiments.md](docs/experiments.md) | 典型的な実験の進め方と結果の見方（レシピ 6: Shiba et al. の再現検証） |
-| [docs/d_dz_prs.md](docs/d_dz_prs.md) | パケットロス対策 D+DZ+PRS（差分符号化 + dead-zone 量子化 + NACK による参照フレーム選択）の詳しい解説 |
+| [docs/d_dz_rps.md](docs/d_dz_rps.md) | パケットロス対策 D+DZ+RPS（差分符号化 + dead-zone 量子化 + NACK による参照フレーム選択）の詳しい解説 |
 | [docs/entropy_coding.md](docs/entropy_coding.md) | パケットロス実験のエントロピー符号化（パケットごとの 0 次適応算術符号化）の仕組みと圧縮効率の解説 |
 
 ## ディレクトリ構成
