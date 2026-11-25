@@ -4,7 +4,7 @@
 #   方式（schemes）・ビット数・クリップ数・シードは本番と同じ。方式を足すときは本番の設定に書けば、ここにも反映される。
 #
 #   実行: python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml
-#   方式を絞る: ... --scheme D+DZ --scheme D+DZ+R
+#   方式を絞る: ... --scheme D+DZ --scheme D+DZ+PRS
 # =====================================================================
 
 base: packet_loss_ucf101.yaml

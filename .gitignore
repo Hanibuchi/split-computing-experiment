@@ -232,3 +232,8 @@ checkpoints/
 
 # macOS が Finder の表示設定（アイコン位置など）を保存するファイル
 .DS_Store
+
+# Claude Code の個人設定（自動レビューの Stop hook など）
+.claude/settings.local.json
+.claude/hooks/
+.claude/.last-review-hash

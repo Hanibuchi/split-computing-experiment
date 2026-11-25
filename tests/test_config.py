@@ -57,3 +57,17 @@ def test_packet_loss_quick_config():
     assert quick.bits == full.bits
     assert quick.seeds == full.seeds
     assert quick.data == full.data
+
+
+def test_packet_loss_main_config():
+    """メイン実験の設定が方針（論文と同じビット数・Bernoulli と GE だけ・p_step は intra）どおりか。"""
+    cfg = load_config(PacketLossConfig, CONFIGS / "packet_loss_ucf101.yaml")
+    assert cfg.bits == [2, 4, 6, 8]  # 論文 Table 8 と同じ
+    assert cfg.gop == 30
+    assert {l.name for l in cfg.losses} == {"bernoulli", "gilbert_elliott"}
+    assert sum(l.p == 0 for l in cfg.losses) == 1  # agreement_drop の基準
+    assert [s.name for s in cfg.schemes] == [
+        "F+Sym", "D+Sym", "D+DZ", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25",
+    ]
+    assert all(s.p_step == "intra" for s in cfg.schemes)
+    assert all(s.restorer is None for s in cfg.schemes)
