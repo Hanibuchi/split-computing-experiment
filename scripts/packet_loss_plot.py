@@ -260,7 +260,7 @@ def plot_gop_curves(gop: pd.DataFrame, out_dir: Path, bits: int) -> None:
 
 
 def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernoulli(p=0.05)") -> None:
-    """送信量（rate_kb_per_frame）→ 一致率。ロスなしと lossy を並べる。点はビット数（2/4/8）。"""
+    """送信量（rate_kb_per_frame）→ 一致率。ロスなしと lossy を並べる。点は設定のビット数。"""
     models = models_of(df)
     conds = [c for c in ["no_loss", lossy] if c in set(df.loss)]
     fig, axes = plt.subplots(len(conds), len(models), figsize=(2.9 * len(models), 2.5 * len(conds)),
@@ -353,7 +353,7 @@ def md_table(t: pd.DataFrame, digits: int = 3) -> str:
 def write_summary(df: pd.DataFrame, diff: pd.DataFrame, run_dir: Path, path: Path) -> None:
     clean = df[df.loss_p == 0]
     parts = [f"# packet loss 実験の要約: `{run_dir}`", ""]
-    parts += ["## ロスなし（loss_p = 0）の一致率", "", "論文 Table 8 の FD（F+Sym）/ DPCM（D+DZ）と比べる。", "",
+    parts += ["## ロスなし（loss_p = 0）の一致率", "", "論文 Table 8 の FD（F+Sym）/ DPCM（D+Sym）と比べる（Table 8 は P フレームの q を毎フレーム決め直す設定なので、p_step: intra の結果とは完全には一致しない）。", "",
               md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="agreement")
                        .reindex(columns=SCHEMES)), ""]
     parts += ["## ロスなしのエントロピー [bit/要素]", "",

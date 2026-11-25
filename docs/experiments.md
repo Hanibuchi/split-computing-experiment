@@ -136,6 +136,23 @@ Shiba et al., "Delta Coding With Dead-Zone Quantization for Bandwidth-Efficient 
 Video Streams"（IEEE Access 2026）の方式を、パケットロスのある通信路で評価します。
 同論文では、パケットロスは今後の課題とされています（§VII-E-5）。
 
+### メイン実験の設定方針（`configs/packet_loss_ucf101.yaml`）
+
+- **論文と同じにする項目**: モデルと分割点（Fig.5 の代表 4 条件: EfficientNetV2-S/S4, ResNet-50/L2, VGG16/16, MobileNetV2/S14）、
+  UCF-101 の 30 本（著者提供のクリップと開始フレーム）、30 フレーム（30fps）、GoP 30、ビット数 2/4/6/8（Table 8）、
+  θ = 0、範囲 R = P99、方式 F+Sym / D+Sym / D+DZ
+- **自分で決めた項目**: パケットロスのモデルと率（論文はパケットロスを扱っていない）。
+  - メイン: **Bernoulli**（各パケットが独立に確率 p で落ちる。理論的に扱いやすいのでこちらを主に見る）
+  - サブ: **Gilbert-Elliott**（平均バースト長 4 パケットのバーストロス）
+  - ロス率はどちらも p = 0.01, 0.02, 0.05, 0.1, 0.2（と基準の p = 0）。フレーム単位のロス（`frame`）は実装はあるが、メイン実験では使わない
+- **扱わない項目**: 帯域・遅延・deadline。パケットロス実験の結果（一致率・送信量）はこれらに依存しないので、設定にも出てこない。
+  PRS の NACK の遅れもフレーム数 `feedback_delay: d` だけで表す
+- 独自の方式として、多系列 DPCM（D+DZ+S2 / S5）、PRS（D+DZ+PRS / PRS3）、FEC（D+DZ+FEC10 / FEC25）を比べる。
+  ロス補修 net（D+DZ+R）はメイン実験には入れていない（試すときは方式に足す。下の「ロス補修 net」を参照）
+- P フレームの量子化幅は既定の `p_step: intra`（I フレームの q に固定）。論文の精度評価（Table 8）は P フレームごとに q を
+  決め直す設定（adaptive）で、しかも対称量子化なので、ロスなしの一致率は Table 8 と完全には一致しない
+  （Table 8 の FD に当たるのが F+Sym、DPCM に当たるのが D+Sym）
+
 1. `pip install -e ".[video]"` で PyAV を入れる。UCF-101 は手で用意しなくてよい。初回実行時に、使う 30 本だけ
    （約 15MB）が HuggingFace の ZIP ミラーから `./data/UCF-101/<クラス名>/` に自動でダウンロードされる
    （7GB 全体は落とさない）
@@ -144,14 +161,14 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
 3. 新手法を試す段階（お試し）: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml`
    - 本番の設定を `base:` で読み、モデルを resnet50 / vgg16 の 2 つ、損失を Gilbert-Elliott（と基準の no_loss）だけに減らしたもの。
      方式・ビット数・クリップ数・シードは本番と同じ（方式を足すときは本番の設定に書けば、お試し側にも反映される）
-   - 損失・シードの組は 46 → 16 通り。結果は `runs/packet_loss_ucf101_quick_<日時>/` に出るので本番と混ざらない
-   - `--scheme D+DZ --scheme D+DZ+R` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
+   - 損失・シードの組は 31 → 16 通り。結果は `runs/packet_loss_ucf101_quick_<日時>/` に出るので本番と混ざらない
+   - `--scheme D+DZ --scheme D+DZ+PRS` のように方式も絞れる（`--target` と同じく複数回指定できる。本番の設定にも使える）
 4. 本番: `python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml`
    （時間がかかるので、ssh で動かすなら tmux の中で。Slurm クラスタでは下の「Slurm クラスタで動かす」を参照）
 
 実行時間について:
 - 端末側の符号化（I/P の判定・差分の計算・量子化・エントロピー・パケット分割）は損失条件によらないので、
-  クリップごとに (方式, ビット数) ごとに 1 回だけ行い、全ての損失条件・シード（既定の設定で 46 通り）で使い回す。
+  クリップごとに (方式, ビット数) ごとに 1 回だけ行い、全ての損失条件・シード（既定の設定で 31 通り）で使い回す。
   以前は損失条件ごとに符号化し直していた。結果は以前の版と完全に一致する（`tests/test_temporal.py` で確認している）。
   ResNet50/layer2 相当の特徴で、CPU 側の処理が約 10 倍速くなる
 - 符号化・復号は CPU で行い、GPU は tail だけに使う
@@ -216,8 +233,6 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 `scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
 結果は全ての配列のジョブで 1 つのフォルダ `runs/<設定ファイル名>_<配列ジョブ ID>/` に入り、全部終わると自動でまとめと作図まで行う（下の 5）。
 GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は、python で直接実行するときと同じく設定の `schemes` が全て実行される。絞るときは `SCHEMES="F+Sym D+DZ"` のように名前を並べる（`--scheme` に当たる）。
-本番の設定の D+DZ+R はロス補修 net（`checkpoints/restorer_resnet50_layer2.pt`）が要るので、まだ学習していないときは
-`SCHEMES="F+Sym D+Sym D+DZ D+DZ+S2 D+DZ+S5 D+DZ+PRS D+DZ+PRS3 D+DZ+FEC10 D+DZ+FEC25"` と D+DZ+R を除いて投げる（除かないと開始直後にエラーで止まる）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
 ログインノードで作った venv・動画・結果がそのままジョブから見える）。
 
@@ -334,7 +349,7 @@ uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで
     フレーム内で欠ける要素の割合やロスの分布が方式ごとに違う
   - 以前の版（b ビット固定長で詰めていた）の結果とは、`packets_per_frame` / `bytes_per_frame` とロスのパターンが違うので、
     ロスありの一致率は直接比べられない（ロスなしの一致率は同じ）
-- 損失モデル（`losses`）: `bernoulli` / `gilbert_elliott`（`burst_len`）/ `frame`
+- 損失モデル（`losses`）: `bernoulli` / `gilbert_elliott`（`burst_len`）/ `frame`（メイン実験は `bernoulli` と `gilbert_elliott` だけ）
 - 届かなかった要素は `concealment` で補う。`hold` は直前の値（P フレームでは差分 0 と同じ）、`zero` は 0
 - 端末はロスを知らない。そのため DPCM では、ロスによる端末とクラウドの状態のずれが次の I フレームまで残る
 
@@ -359,7 +374,7 @@ python scripts/packet_loss_plot.py runs/packet_loss_ucf101_merged
 import pandas as pd
 df = pd.read_csv("runs/<実行ディレクトリ>/results.csv")
 # 損失モデルごとに分ける（混ぜると、同じ loss_p の Bernoulli と GE の行が平均されてしまう）。loss_p = 0 の行は基準として入れる
-for m in ["bernoulli", "gilbert_elliott", "frame"]:
+for m in ["bernoulli", "gilbert_elliott"]:
     sub = df[(df.loss_model == m) | (df.loss_p == 0)]
     print(f"\n== {m}")
     print(sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement").round(3))
@@ -400,8 +415,9 @@ D+DZ+R は再学習をしない代わりに、**クラウド側で復号のあ�
    `val_rel_err`、hold だけの場合の `val_rel_err_hold`、その比 `val_ratio`（1 未満なら hold より良い）が出る。
    検証の誤差が最も小さかったエポックの重みが残る
 
-2. 評価する。`configs/packet_loss_ucf101.yaml` の `schemes` に D+DZ+R の行がある（`restorer:` に重みのパス）。
-   学習していないときはこの行を消すかコメントアウトする
+2. 評価する。メイン実験の設定には D+DZ+R が入っていないので、`configs/packet_loss_ucf101.yaml` の `schemes` に
+   `- {name: D+DZ+R, scheme: dpcm, p_quant: dz, restorer: checkpoints/restorer_resnet50_layer2.pt}` を足す
+   （`restorer:` に重みのパス。設定ファイルのコメントにも同じ行がある）
 
    ```bash
    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
@@ -468,7 +484,7 @@ PRS では、クラウドが **パケットが 1 つでも落ちたフレーム�
 ```
 
 - フィードバック遅延 `feedback_delay: d` [フレーム]: フレーム t の NACK はフレーム t + d を符号化する前に端末に届く
-  （30fps なら d = 1 は RTT 33ms 以内、d = 3 は 100ms 以内）。フィードバック路ではロスは起きないとする（NACK は小さいので冗長に送れる前提）
+  （遅れはフレーム数だけで表し、帯域・遅延は扱わない）。フィードバック路ではロスは起きないとする（NACK は小さいので冗長に送れる前提）
 - 端末は「NACK されたフレーム、または参照先が壊れたフレーム」を壊れたとみなす（参照関係は端末が知っているので伝搬も端末で計算できる）。
   NACK がまだ来ていないフレームは無事とみなす（ACK を返さないので楽観的）
 - 参照の選び方: 通常の参照（max(t − n, GoP 先頭)）以前で無事な最新のフレーム → 無ければ t より前で無事な最新のフレーム →
@@ -524,8 +540,8 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.ya
 ```
 
 FEC の検証用に `configs/packet_loss_ucf101_fec.yaml` もあります。efficientnet_v2_s / features_4 と vgg16 / features_16 の 2 モデル、
-F+Sym / D+DZ / D+DZ+FEC10 / D+DZ+FEC25 の 4 方式、bernoulli と gilbert_elliott のロス率 0〜0.2 だけを回します
-（FEC が効かない frame 単位のロスは外しています。他の項目は本番の設定と同じ）。
+F+Sym / D+DZ / D+DZ+FEC10 / D+DZ+FEC25 の 4 方式、ロスは本番と同じ bernoulli と gilbert_elliott のロス率 0〜0.2 を回します
+（モデルと方式以外の項目は本番の設定と同じ）。
 1 フレームのパケット数が少ないモデル（efficientnet_v2_s）と多いモデル（vgg16）で、FEC の効き方を比べられます。
 Slurm クラスタでは target が 2 つなので `--array=0-1` を付けて投げます:
 
