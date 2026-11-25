@@ -1,11 +1,11 @@
-# D+DZ+PRS 解説: 差分符号化 + dead-zone 量子化 + NACK による参照フレーム選択
+# D+DZ+RPS 解説: 差分符号化 + dead-zone 量子化 + NACK による参照フレーム選択
 
 このドキュメントでは、パケットロス実験（[experiments.md のレシピ 5](experiments.md)）で使う方式
-**D+DZ+PRS** について、何をしているのか・なぜ効くのか・どこに実装されているのか・どう使うのかを、図を中心に順に説明します。
+**D+DZ+RPS** について、何をしているのか・なぜ効くのか・どこに実装されているのか・どう使うのかを、図を中心に順に説明します。
 
-- 実装: `src/splitcomp/temporal/coding.py`（`TemporalEncoder` / `TemporalDecoder`）、`scripts/packet_loss_sweep.py`（`prs_clip`）
-- 設定: `configs/packet_loss_ucf101.yaml` の `D+DZ+PRS`（フィードバック遅延 d = 1）と `D+DZ+PRS3`（d = 3）
-- 元になった論文: H. Shiba et al., "Delta Coding With Dead-Zone Quantization for Bandwidth-Efficient Split Computing on Video Streams," IEEE Access, vol. 14, 2026（D+DZ まで。PRS はこの基盤で追加したもの）
+- 実装: `src/splitcomp/temporal/coding.py`（`TemporalEncoder` / `TemporalDecoder`）、`scripts/packet_loss_sweep.py`（`rps_clip`）
+- 設定: `configs/packet_loss_ucf101.yaml` の `D+DZ+RPS`（フィードバック遅延 d = 1）と `D+DZ+RPS3`（d = 3）
+- 元になった論文: H. Shiba et al., "Delta Coding With Dead-Zone Quantization for Bandwidth-Efficient Split Computing on Video Streams," IEEE Access, vol. 14, 2026（D+DZ まで。RPS はこの基盤で追加したもの）
 
 > 図は [Mermaid](https://mermaid.js.org/) で書いています。GitHub や VS Code（Markdown Preview Mermaid Support などの拡張）でそのまま表示されます。
 >
@@ -21,7 +21,7 @@
 3. [D: 差分符号化（DPCM）](#3-d-差分符号化dpcm)
 4. [DZ: dead-zone 量子化](#4-dz-dead-zone-量子化)
 5. [パケットロスで D+DZ に起きること](#5-パケットロスで-ddz-に起きること)
-6. [PRS: 壊れたフレームを避けて参照する](#6-prs-壊れたフレームを避けて参照する)
+6. [RPS: 壊れたフレームを避けて参照する](#6-rps-壊れたフレームを避けて参照する)
 7. [具体例でたどる](#7-具体例でたどる)
 8. [コストと性質](#8-コストと性質)
 9. [ほかのロス対策との比較](#9-ほかのロス対策との比較)
@@ -41,7 +41,7 @@ flowchart LR
     D --> DZ["<b>DZ</b>: dead-zone 量子化<br/>小さな差は 0 にまとめる"]
     DZ --> NET(["通信路<br/>（パケットロスあり）"])
     NET --> C["クラウドで復号"]
-    C -. "<b>PRS</b>: 壊れたフレームの番号だけ返す（NACK）" .-> D
+    C -. "<b>RPS</b>: 壊れたフレームの番号だけ返す（NACK）" .-> D
 
     style D fill:#e3f2fd,stroke:#1e88e5
     style DZ fill:#e3f2fd,stroke:#1e88e5
@@ -52,14 +52,17 @@ flowchart LR
 |---|---|---|
 | **D** | Delta coding（DPCM） | 「前のフレームとの差」だけを送って、送信量を減らす |
 | **DZ** | Dead-Zone 量子化 | 0 付近の小さな差をまとめて 0 にし、さらに送信量を減らす |
-| **PRS** | NACK による参照フレーム選択 | ロスが起きたら、クラウドが「壊れたフレームの番号」だけを返し、端末は以後**壊れていないフレームとの差**を送る。ロスの伝搬を数フレームで止める |
+| **RPS** | NACK による参照フレーム選択 | ロスが起きたら、クラウドが「壊れたフレームの番号」だけを返し、端末は以後**壊れていないフレームとの差**を送る。ロスの伝搬を数フレームで止める |
 
 D+DZ は帯域を節約できる反面、**1 回のパケットロスが GoP（次の I フレーム）の終わりまで尾を引く**という弱点があります。
-PRS はこの弱点を、ごく小さなフィードバック（壊れたフレームの番号だけ）で解消します。
+RPS はこの弱点を、ごく小さなフィードバック（壊れたフレームの番号だけ）で解消します。
 **ロスがなければ D+DZ と完全に同じ符号化・同じ結果**になるのも特徴です。
 
-> 名前について: 動画符号化（H.263 Annex N など）では一般に RPS（Reference Picture Selection）と呼ばれる手法です。
-> この基盤では設定名・列名に合わせて **PRS** と書きます。
+> 名前について: 動画符号化（H.263 Annex N など）で RPS（Reference Picture Selection）と呼ばれている手法を、
+> 中間特徴の DPCM に当てはめたものです。HEVC の RPS（Reference Picture **Set**、参照ピクチャの管理の仕組み）とは別物です。
+> 以前の版では頭文字を取り違えて「PRS」と書いていました。その頃の設定（`prs: true`）や結果（`prs` 列・`D+DZ+PRS` などの
+> 方式名）は、読み込むときに自動で RPS の名前に読み替えます（設定ファイル・`--resume`・`--scheme`・`merge_results.py`・
+> `packet_loss_plot.py`）。方式名に単語として「PRS」を含むものは、すべて「RPS」に読み替わります。
 
 ---
 
@@ -67,10 +70,10 @@ PRS はこの弱点を、ごく小さなフィードバック（壊れたフレ�
 
 ### システム全体図
 
-Shiba et al. の FIGURE 1（D+DZ のシステム全体図）と同じ構成・配色で描き、PRS で加わる部分を書き足した図です
-（`docs/images/d_dz_prs_system.svg`）。
+Shiba et al. の FIGURE 1（D+DZ のシステム全体図）と同じ構成・配色で描き、RPS で加わる部分を書き足した図です
+（`docs/images/d_dz_rps_system.svg`）。
 
-![D+DZ+PRS system overview](images/d_dz_prs_system.svg)
+![D+DZ+RPS system overview](images/d_dz_rps_system.svg)
 
 論文の FIGURE 1 から変えたところ:
 - **Reference Selection**（端末、薄紫）: Buffer の中から、クラウドで壊れていない最新のフレームを参照 f̂_ref に選ぶ。
@@ -234,7 +237,7 @@ sequenceDiagram
 
 ---
 
-## 6. PRS: 壊れたフレームを避けて参照する
+## 6. RPS: 壊れたフレームを避けて参照する
 
 ### アイデア
 
@@ -398,9 +401,9 @@ gantt
     axisFormat %s
     section D+DZ（対策なし）
     ずれ（GoP の終わりまで）   :crit, 3, 30
-    section D+DZ+PRS（d=1）
+    section D+DZ+RPS（d=1）
     ずれ                     :crit, 3, 4
-    section D+DZ+PRS3（d=3）
+    section D+DZ+RPS3（d=3）
     ずれ                     :crit, 3, 6
 ```
 
@@ -451,7 +454,7 @@ flowchart LR
     style GAIN fill:#d1e7dd,stroke:#198754
 ```
 
-| 項目 | D+DZ+PRS の性質 |
+| 項目 | D+DZ+RPS の性質 |
 |---|---|
 | ロスなし | D+DZ と**完全に同じ**符号化・送信量・精度（代償なし） |
 | 端末→クラウドの送信量 | ヘッダは増えない。ロス後は参照が古くなる分、差が大きくなって少し増える。強制 I フレームのぶんも増える |
@@ -480,7 +483,7 @@ flowchart LR
         b1["1"] --> b3["3 ❌"] --> b5["5"] --> b7["…"]
         b2["2"] --> b4["4"] --> b6["6"] --> b8["…"]
     end
-    subgraph C["D+DZ+PRS（d=1）"]
+    subgraph C["D+DZ+RPS（d=1）"]
         direction LR
         c2["2"] --> c3["3 ❌"]
         c2 ==> c4["4"] --> c5["5"] --> c6["…"]
@@ -499,10 +502,10 @@ flowchart LR
 | D+DZ | 対策なし | – | なし | GoP の終わりまで |
 | D+DZ+R | クラウドの小さな CNN で欠けた要素を推定 | なし | なし | 減るが残る |
 | D+DZ+S2 / S5 | 参照を n フレーム前にして n 本の独立な系列に分ける | **あり**（差が大きくなり量子化誤差・送信量が増える） | なし | その系列（GoP の 1/n）だけ |
-| **D+DZ+PRS / PRS3** | NACK を受けて壊れていないフレームを参照 | **なし** | 壊れたフレームの番号だけ | **d フレーム** |
+| **D+DZ+RPS / RPS3** | NACK を受けて壊れていないフレームを参照 | **なし** | 壊れたフレームの番号だけ | **d フレーム** |
 | F+Sym | 毎フレーム I | 送信量が多い | なし | 伝搬しない |
 
-PRS は `streams`（多系列）や `restorer`（ロス補修 net）とも組み合わせられます（方式の設定に両方書けばよい）。
+RPS は `streams`（多系列）や `restorer`（ロス補修 net）とも組み合わせられます（方式の設定に両方書けばよい）。
 
 ---
 
@@ -512,7 +515,7 @@ PRS は `streams`（多系列）や `restorer`（ロス補修 net）とも組み
 classDiagram
     class TemporalEncoder {
         +scheme / bits / gop / p_quant / streams
-        +prs: bool
+        +rps: bool
         +history: dict t → f と f̂
         +refs: dict t → 参照フレーム番号
         +nacked: set NACK を受けたフレーム
@@ -537,22 +540,22 @@ classDiagram
     }
     TemporalEncoder --> EncodedFrame : encode()
     EncodedFrame --> TemporalDecoder : decode()
-    TemporalDecoder ..> TemporalEncoder : NACK（prs_clip が仲介）
+    TemporalDecoder ..> TemporalEncoder : NACK（rps_clip が仲介）
 ```
 
 | 内容 | 場所 |
 |---|---|
-| PRS の有効化、NACK の受け取り | `TemporalEncoder(prs=True)`、`TemporalEncoder.nack(t)`（`src/splitcomp/temporal/coding.py`） |
+| RPS の有効化、NACK の受け取り | `TemporalEncoder(rps=True)`、`TemporalEncoder.nack(t)`（`src/splitcomp/temporal/coding.py`） |
 | 壊れているかの判定（参照をたどる） | `TemporalEncoder.is_broken(t)` |
 | 参照フレームの選択（3 段階） | `TemporalEncoder.select_ref(t)` |
 | 強制 I フレームの回数 | `TemporalEncoder.forced_intra` |
-| 参照先を見て復号 | `TemporalDecoder.decode(frame, received)`（`frame.ref` を使う。PRS 用の変更は不要） |
+| 参照先を見て復号 | `TemporalDecoder.decode(frame, received)`（`frame.ref` を使う。RPS 用の変更は不要） |
 | dead-zone 量子化 | `deadzone_quantize`（`src/splitcomp/temporal/quantize.py`） |
-| 端末とクラウドを 1 フレームずつ交互に動かす閉ループ | `prs_clip`（`scripts/packet_loss_sweep.py`） |
+| 端末とクラウドを 1 フレームずつ交互に動かす閉ループ | `rps_clip`（`scripts/packet_loss_sweep.py`） |
 
 ### 端末の状態
 
-- `history`: 現在の GoP のフレーム番号 → (f, f̂)。PRS では古いフレームを参照し直すことがあるので、GoP 内のものは全部残す（PRS なしは直近 `streams` 枚だけ）
+- `history`: 現在の GoP のフレーム番号 → (f, f̂)。RPS では古いフレームを参照し直すことがあるので、GoP 内のものは全部残す（RPS なしは直近 `streams` 枚だけ）
 - `refs`: 現在の GoP のフレーム番号 → 参照フレーム番号（I フレームは None）。`is_broken` がこれをたどる
 - `nacked`: 現在の GoP で NACK を受けたフレーム番号
 - GoP の先頭（通常の I フレーム）で 3 つともクリアする。前の GoP のフレームへの NACK は今後の参照に関係しないので無視する
@@ -572,7 +575,7 @@ stateDiagram-v2
     PEnc --> GopStart: 次の GoP
 ```
 
-### シミュレーションの閉ループ（`prs_clip` の流れ）
+### シミュレーションの閉ループ（`rps_clip` の流れ）
 
 ```mermaid
 flowchart TB
@@ -599,7 +602,7 @@ for t in range(T):
         arriving[t + feedback_delay].append(t)   # クラウドが NACK を返す
 ```
 
-PRS は端末の符号化がロス（= フィードバック）に依存するので、ほかの方式のように「符号化を 1 回だけして全ての損失条件で使い回す」ことができません。
+RPS は端末の符号化がロス（= フィードバック）に依存するので、ほかの方式のように「符号化を 1 回だけして全ての損失条件で使い回す」ことができません。
 ただし、今の GoP でまだ NACK を受けていないフレームはフィードバックなしと同じ符号化になるので、そのパケット分割を使い回して高速化しています（結果は完全に一致）。
 
 ---
@@ -612,18 +615,18 @@ PRS は端末の符号化がロス（= フィードバック）に依存する�
 
 ```yaml
 schemes:
-  - {name: D+DZ+PRS,  scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 1}   # NACK が次のフレームまでに届く
-  - {name: D+DZ+PRS3, scheme: dpcm, p_quant: dz, prs: true, feedback_delay: 3}   # NACK が 3 フレーム後に届く
+  - {name: D+DZ+RPS,  scheme: dpcm, p_quant: dz, rps: true, feedback_delay: 1}   # NACK が次のフレームまでに届く
+  - {name: D+DZ+RPS3, scheme: dpcm, p_quant: dz, rps: true, feedback_delay: 3}   # NACK が 3 フレーム後に届く
 ```
 
-- `prs: true` は `scheme: fd` では使えない（P フレームが無いため）。`feedback_delay` は 1 以上
+- `rps: true` は `scheme: fd` では使えない（P フレームが無いため）。`feedback_delay` は 1 以上
 - 多系列と組み合わせるなら `streams: 2`、ロス補修 net と組み合わせるなら `restorer: checkpoints/...pt` を足す
 
 ### 実行
 
 ```bash
-# D+DZ と PRS（d = 1, 3）を、お試し設定（resnet50 / vgg16、Gilbert-Elliott のみ）で比べる
-python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+PRS --scheme D+DZ+PRS3
+# D+DZ と RPS（d = 1, 3）を、お試し設定（resnet50 / vgg16、Gilbert-Elliott のみ）で比べる
+python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --scheme D+DZ --scheme D+DZ+RPS --scheme D+DZ+RPS3
 
 # 本番（全方式・全損失モデル）
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml
@@ -637,7 +640,7 @@ python scripts/packet_loss_plot.py runs/<実行フォルダ>
 ```python
 from splitcomp.temporal import TemporalEncoder, TemporalDecoder
 
-enc = TemporalEncoder("dpcm", bits=4, gop=30, p_quant="dz", prs=True)
+enc = TemporalEncoder("dpcm", bits=4, gop=30, p_quant="dz", rps=True)
 dec = TemporalDecoder("hold")
 
 for t, f in enumerate(features):          # f: (C, H, W) の中間特徴
@@ -658,7 +661,7 @@ for t, f in enumerate(features):          # f: (C, H, W) の中間特徴
 
 | 列 | 意味 |
 |---|---|
-| `prs` / `feedback_delay` | PRS かどうか / NACK が届くまでのフレーム数 d |
+| `rps` / `feedback_delay` | RPS かどうか / NACK が届くまでのフレーム数 d |
 | `agreement` / `agreement_drop` | 元モデルとの一致率 / ロスなしからの低下 |
 | `bytes_per_frame` | 1 フレームの送信量（端末→クラウド。強制 I フレームの分も含む） |
 | `nacks_per_frame` | 1 フレームあたりの NACK 数（フィードバック量。1 つ = 4 バイト） |
@@ -670,12 +673,12 @@ for t, f in enumerate(features):          # f: (C, H, W) の中間特徴
 
 `runs/packet_loss_ucf101_quick_PRS/`（お試し設定、Gilbert-Elliott 損失・平均バースト長 4 パケット、UCF-101 の 30 クリップ、4-bit）の結果です。
 
-**resnet50/layer2 の一致率**（棒は左から F+Sym / D+DZ / D+DZ+PRS / D+DZ+PRS3）:
+**resnet50/layer2 の一致率**（棒は左から F+Sym / D+DZ / D+DZ+RPS / D+DZ+RPS3）:
 
 ```mermaid
 xychart-beta
     title "resnet50/layer2, 損失率 1%"
-    x-axis ["F+Sym", "D+DZ", "D+DZ+PRS", "D+DZ+PRS3"]
+    x-axis ["F+Sym", "D+DZ", "D+DZ+RPS", "D+DZ+RPS3"]
     y-axis "一致率" 0 --> 1
     bar [0.866, 0.870, 0.910, 0.907]
 ```
@@ -683,7 +686,7 @@ xychart-beta
 ```mermaid
 xychart-beta
     title "resnet50/layer2, 損失率 5%"
-    x-axis ["F+Sym", "D+DZ", "D+DZ+PRS", "D+DZ+PRS3"]
+    x-axis ["F+Sym", "D+DZ", "D+DZ+RPS", "D+DZ+RPS3"]
     y-axis "一致率" 0 --> 1
     bar [0.850, 0.730, 0.860, 0.857]
 ```
@@ -691,12 +694,12 @@ xychart-beta
 ```mermaid
 xychart-beta
     title "resnet50/layer2, 損失率 20%"
-    x-axis ["F+Sym", "D+DZ", "D+DZ+PRS", "D+DZ+PRS3"]
+    x-axis ["F+Sym", "D+DZ", "D+DZ+RPS", "D+DZ+RPS3"]
     y-axis "一致率" 0 --> 1
     bar [0.829, 0.426, 0.814, 0.781]
 ```
 
-**損失率による D+DZ と D+DZ+PRS の一致率の変化**（resnet50/layer2。上の線が D+DZ+PRS、下がっていく線が D+DZ）:
+**損失率による D+DZ と D+DZ+RPS の一致率の変化**（resnet50/layer2。上の線が D+DZ+RPS、下がっていく線が D+DZ）:
 
 ```mermaid
 xychart-beta
@@ -709,7 +712,7 @@ xychart-beta
 
 数値の一覧:
 
-| モデル | 損失率 p | F+Sym | D+DZ | D+DZ+PRS（d=1） | D+DZ+PRS3（d=3） |
+| モデル | 損失率 p | F+Sym | D+DZ | D+DZ+RPS（d=1） | D+DZ+RPS3（d=3） |
 |---|---|---|---|---|---|
 | resnet50/layer2 | 0（ロスなし） | 0.868 | 0.917 | 0.917 | 0.917 |
 | | 0.01 | 0.866 | 0.870 | **0.910** | 0.907 |
@@ -725,12 +728,12 @@ xychart-beta
 ```mermaid
 xychart-beta
     title "1 フレームの送信量 [KB]（resnet50/layer2, 損失率 20%）"
-    x-axis ["F+Sym", "D+DZ", "D+DZ+PRS", "D+DZ+PRS3"]
+    x-axis ["F+Sym", "D+DZ", "D+DZ+RPS", "D+DZ+RPS3"]
     y-axis "KB / フレーム" 0 --> 100
     bar [92.3, 84.4, 93.5, 89.6]
 ```
 
-| 損失率 p | F+Sym | D+DZ | D+DZ+PRS | D+DZ+PRS3 | PRS の NACK/フレーム | PRS の強制 I/フレーム |
+| 損失率 p | F+Sym | D+DZ | D+DZ+RPS | D+DZ+RPS3 | RPS の NACK/フレーム | RPS の強制 I/フレーム |
 |---|---|---|---|---|---|---|
 | 0 | 92,338 | 84,398 | 84,398 | 84,398 | 0 | 0 |
 | 0.01 | 92,338 | 84,398 | 85,221 | 85,796 | 0.14 | 0.005 |
@@ -741,7 +744,7 @@ xychart-beta
 
 読み取れること:
 - **ロスなしでは D+DZ と完全に一致**（代償なし）
-- ロスがあると D+DZ は大きく崩れる（resnet50, p = 0.2 で 0.917 → 0.426）が、PRS はほぼ F+Sym 並みの耐性を保ち、低〜中程度のロスでは F+Sym も D+DZ も上回る
+- ロスがあると D+DZ は大きく崩れる（resnet50, p = 0.2 で 0.917 → 0.426）が、RPS はほぼ F+Sym 並みの耐性を保ち、低〜中程度のロスでは F+Sym も D+DZ も上回る
 - d = 1 のほうが d = 3 より良い（伝搬が短い）が、差は小さい
 - 送信量は、ロスが少なければ D+DZ よりわずかに増えるだけ。ロスが多いと増える
 
@@ -784,7 +787,7 @@ flowchart LR
         direction TB
         k1["毎フレーム ACK を返す"] --> k2["ACK が届いたフレームだけ参照<br/>→ 参照は常に d フレーム以上古い<br/>→ ロスなしでも送信量が増える"]
     end
-    subgraph NACK["NACK 方式（PRS）"]
+    subgraph NACK["NACK 方式（RPS）"]
         direction TB
         n1["ロスしたときだけ NACK"] --> n2["ふだんは直前のフレームを参照<br/>→ ロスなしなら D+DZ と同じ"]
     end
@@ -802,8 +805,8 @@ A. 時間的に離れたフレームほど特徴の差が大きいので、量�
 A. 変わりません。次の通常の I フレームは GoP の区切り（t mod GoP = 0）のままです。強制 I フレームは参照の起点になるだけです。
 
 **Q. クラウド側の実装を変える必要はあるか？**
-A. ありません。`TemporalDecoder` は各フレームの `ref` を見て参照フレームを選び、GoP 内の復元済みフレームを保存しているので、PRS でも多系列でもそのまま復号できます。
+A. ありません。`TemporalDecoder` は各フレームの `ref` を見て参照フレームを選び、GoP 内の復元済みフレームを保存しているので、RPS でも多系列でもそのまま復号できます。
 
 ---
 
-関連: [experiments.md のレシピ 5](experiments.md)（PRS・多系列・ロス補修 net の実験手順）、[architecture.md](architecture.md)、[usage.md](usage.md)
+関連: [experiments.md のレシピ 5](experiments.md)（RPS・多系列・ロス補修 net の実験手順）、[architecture.md](architecture.md)、[usage.md](usage.md)

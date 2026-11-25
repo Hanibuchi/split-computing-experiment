@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from splitcomp.config import PacketLossConfig, load_config
+from splitcomp.config import PacketLossConfig, load_config, upgrade_legacy_rps_name, upgrade_legacy_rps_row
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
@@ -67,7 +67,32 @@ def test_packet_loss_main_config():
     assert {l.name for l in cfg.losses} == {"bernoulli", "gilbert_elliott"}
     assert sum(l.p == 0 for l in cfg.losses) == 1  # agreement_drop の基準
     assert [s.name for s in cfg.schemes] == [
-        "F+Sym", "D+Sym", "D+DZ", "D+DZ+S2", "D+DZ+S5", "D+DZ+PRS", "D+DZ+PRS3", "D+DZ+FEC10", "D+DZ+FEC25",
+        "F+Sym", "D+Sym", "D+DZ", "D+DZ+S2", "D+DZ+S5", "D+DZ+RPS", "D+DZ+RPS3", "D+DZ+FEC10", "D+DZ+FEC25",
     ]
     assert all(s.p_step == "intra" for s in cfg.schemes)
     assert all(s.restorer is None for s in cfg.schemes)
+
+
+def test_legacy_prs_config_is_read_as_rps(tmp_path):
+    """旧名（頭文字を取り違えた PRS）の設定も、RPS の設定として読める（以前の実行フォルダを --resume するため）。"""
+    path = _write(tmp_path / "old.yaml", {"schemes": [
+        {"name": "D+DZ", "scheme": "dpcm", "p_quant": "dz"},
+        {"name": "D+DZ+PRS3", "scheme": "dpcm", "p_quant": "dz", "prs": True, "feedback_delay": 3},
+        {"name": "D+DZ+QI+PRS", "scheme": "dpcm", "p_quant": "dz", "prs": True},
+    ]})
+    cfg = load_config(PacketLossConfig, path)
+    assert [s.name for s in cfg.schemes] == ["D+DZ", "D+DZ+RPS3", "D+DZ+QI+RPS"]
+    assert [s.rps for s in cfg.schemes] == [False, True, True]
+    assert cfg.schemes[1].feedback_delay == 3
+    with pytest.raises(KeyError):
+        load_config(PacketLossConfig, _write(tmp_path / "both.yaml", {"schemes": [{"prs": True, "rps": True}]}))
+
+
+def test_legacy_prs_result_rows_are_renamed():
+    """旧名の結果の行は、列 prs → rps・方式名 PRS → RPS に読み替える（列の順は保つ。ほかの名前は変えない）。"""
+    row = {"model": "resnet50", "scheme": "D+DZ+PRS3", "bits": 4, "prs": True, "feedback_delay": 3}
+    assert upgrade_legacy_rps_row(row) == {"model": "resnet50", "scheme": "D+DZ+RPS3", "bits": 4, "rps": True, "feedback_delay": 3}
+    assert list(upgrade_legacy_rps_row(row)) == ["model", "scheme", "bits", "rps", "feedback_delay"]
+    assert upgrade_legacy_rps_row({"scheme": "D+DZ+PRS"}) == {"scheme": "D+DZ+RPS"}  # gop_curve の行（prs 列なし）
+    for name in ("D+DZ", "F+Sym", "D+DZ+FEC10", "D+DZ+RPS"):
+        assert upgrade_legacy_rps_name(name) == name

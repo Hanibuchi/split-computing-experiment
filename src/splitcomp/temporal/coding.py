@@ -17,7 +17,7 @@ P フレームで送るものは方式によって違う:
 
     例（n = 2, GoP = 6）:  0(I) ← 1, 0 ← 2 ← 4,  1 ← 3 ← 5
 
-PRS（Reference Picture Selection, prs=True）:
+RPS（Reference Picture Selection, rps=True）:
     クラウドは、パケットが 1 つでも落ちたフレームの番号だけを NACK として端末に返す（届いたフレームについては何も返さないので、
     フィードバックはロスが起きたときの数バイトだけで、端末→クラウドの送信量は増えない）。端末は NACK を :meth:`TemporalEncoder.nack` で受け取り、
     「NACK されたフレーム、または参照先が壊れたフレーム」を壊れたとみなす（参照関係は端末が知っているので伝搬は端末で計算できる）。
@@ -27,7 +27,7 @@ PRS（Reference Picture Selection, prs=True）:
         2. それが無ければ、t より前で無事な最新のフレーム（多系列で、系列の先頭側がすべて壊れたとき）
         3. それも無ければ（GoP 先頭の I フレームが壊れたとき）、そのフレームを I フレームにする
 
-    とする。ロスがなければ prs=False と全く同じ符号化になる。参照先はパケットヘッダの「種類」u8 の残り 7 ビットに
+    とする。ロスがなければ rps=False と全く同じ符号化になる。参照先はパケットヘッダの「種類」u8 の残り 7 ビットに
     t − ref として入れる（GoP ≤ 128 なら足りる）ので、ヘッダは増えない。
 
 P フレームのステップ幅（p_step。既定は intra）:
@@ -35,7 +35,7 @@ P フレームのステップ幅（p_step。既定は intra）:
                差分が小さければ q も同じ割合で小さくなるので、インデックスの分布の形（= エントロピー・送信量）は
                I フレームとあまり変わらない。差分にした効果は量子化誤差が小さくなる形で表れる
     intra    : P フレームの q を、直近の I フレームの q × p_step_scale に固定する。差分が小さいほどインデックスが 0 付近に集まり、
-               送信量が減る。差分が ±2^(b−1)·q を超えた要素はクリップ（飽和）される。PRS で P フレームの代わりに I フレームにしたときは、
+               送信量が減る。差分が ±2^(b−1)·q を超えた要素はクリップ（飽和）される。RPS で P フレームの代わりに I フレームにしたときは、
                そのフレームの q に切り替える。q は毎フレームのパケットのヘッダで送っているので、復号器は変わらない。
                本基盤の既定（論文の設定ではない）。送信量が減り、送信量をそろえると一致率も同等以上になるので既定にしている
 
@@ -96,7 +96,7 @@ class TemporalEncoder:
         theta: スパース化しきい値（|x| < theta·R を量子化前に 0 にする。I/P 共通）。
         streams: 系列数 n。P フレームは max(t − n, GoP 先頭) のフレームを参照する。1 で通常の DwD / DPCM。
         full_range: True なら量子化の値を [−R, R] に収める（インデックスは ±2^(b−1) で b ビットに収まらない。論文の再現用）。
-        prs: True ならクラウドからの NACK（:meth:`nack`）を受けて、クラウド側で壊れていないフレームを参照する（PRS）。fd では使えない。
+        rps: True ならクラウドからの NACK（:meth:`nack`）を受けて、クラウド側で壊れていないフレームを参照する（RPS）。fd では使えない。
         p_step: P フレームのステップ幅の決め方 "intra"（直近の I フレームの q に固定。既定）/ "adaptive"（毎フレーム決め直す）。
         p_step_scale: p_step="intra" のときの倍率（P フレームの q = I フレームの q × p_step_scale）。
     """
@@ -111,7 +111,7 @@ class TemporalEncoder:
         theta: float = 0.0,
         streams: int = 1,
         full_range: bool = False,
-        prs: bool = False,
+        rps: bool = False,
         p_step: str = "intra",
         p_step_scale: float = 1.0,
     ):
@@ -119,8 +119,8 @@ class TemporalEncoder:
             raise KeyError(f"未知の方式です: {scheme!r}（使えるもの: {SCHEMES}）")
         if streams < 1:
             raise ValueError(f"streams は 1 以上にしてください（{streams}）")
-        if prs and scheme == "fd":
-            raise ValueError("fd は P フレームが無いので prs は使えません")
+        if rps and scheme == "fd":
+            raise ValueError("fd は P フレームが無いので rps は使えません")
         if p_step not in P_STEPS:
             raise KeyError(f"未知の p_step です: {p_step!r}（使えるもの: {P_STEPS}）")
         if p_step_scale <= 0:
@@ -133,7 +133,7 @@ class TemporalEncoder:
         self.theta = theta
         self.streams = streams
         self.full_range = full_range
-        self.prs = prs
+        self.rps = rps
         self.p_step = p_step
         self.p_step_scale = p_step_scale
         self.reset()
@@ -142,19 +142,19 @@ class TemporalEncoder:
         self.t = 0
         self.prev_true: torch.Tensor | None = None  # f_{t−1}
         self.prev_hat: torch.Tensor | None = None  # 端末が想定するクラウドの f̂_{t−1}
-        # 現在の GoP のフレーム番号 → (f, f̂)（参照フレームを取り出す用）。prs=False なら直近 streams フレームだけ残す
+        # 現在の GoP のフレーム番号 → (f, f̂)（参照フレームを取り出す用）。rps=False なら直近 streams フレームだけ残す
         self.history: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         # 現在の GoP のフレーム番号 → 参照フレーム番号（I フレームは None）
         self.refs: dict[int, int | None] = {}
         # 現在の GoP で NACK を受けたフレーム番号
         self.nacked: set[int] = set()
-        #: 参照できる無事なフレームが無く、P フレームの代わりに I フレームにした回数（prs=True のとき）
+        #: 参照できる無事なフレームが無く、P フレームの代わりに I フレームにした回数（rps=True のとき）
         self.forced_intra = 0
         #: 直近の I フレームのステップ幅 q（p_step="intra" の P フレームで使う）
         self.q_intra: float | None = None
 
     def nack(self, t: int) -> None:
-        """クラウドから「フレーム t が壊れた」という NACK を受け取る（prs=True のときに使う）。
+        """クラウドから「フレーム t が壊れた」という NACK を受け取る（rps=True のときに使う）。
 
         すでに終わった GoP のフレームの NACK は、今後の参照に関係しないので無視する。
         """
@@ -180,10 +180,10 @@ class TemporalEncoder:
     def select_ref(self, t: int) -> int | None:
         """P フレーム t が実際に参照するフレーム番号。None なら I フレームにする。
 
-        prs=False なら :meth:`ref_index` そのもの。prs=True なら壊れていないフレームを選ぶ（モジュールの説明を参照）。
+        rps=False なら :meth:`ref_index` そのもの。rps=True なら壊れていないフレームを選ぶ（モジュールの説明を参照）。
         """
         ref = self.ref_index(t)
-        if not self.prs:
+        if not self.rps:
             return ref
         for candidates in (range(ref, -1, -1), range(t - 1, ref, -1)):
             for s in candidates:
@@ -219,7 +219,7 @@ class TemporalEncoder:
         self.prev_hat = recon
         self.history[t] = (f, recon)
         self.refs[t] = ref
-        if not self.prs:
+        if not self.rps:
             self.history.pop(t - self.streams, None)  # 次のフレームの参照は t − streams + 1 以降
         self.t += 1
         return EncodedFrame(t, kind, idx.flatten(), q, tuple(f.shape), ref)
@@ -275,7 +275,7 @@ class TemporalDecoder:
                 fill = prev if self.concealment == "hold" else torch.zeros_like(value)
                 new = torch.where(received, new, fill)
         self.prev_hat = new.view(frame.shape)
-        # I フレームより前のフレームは後で参照されないので捨てる（PRS では今の ref より古いフレームを後で参照することがあるので、
+        # I フレームより前のフレームは後で参照されないので捨てる（RPS では今の ref より古いフレームを後で参照することがあるので、
         # P フレームでは捨てない）
         if frame.kind == "I":
             self.history.clear()

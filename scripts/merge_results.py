@@ -18,21 +18,27 @@ import csv
 import json
 from pathlib import Path
 
+from splitcomp.config import upgrade_legacy_rps_row
 from splitcomp.metrics import ResultWriter
 
 TABLES = ("results", "gop_curve")
 
 
 def read_rows(run_dir: Path, name: str) -> list[dict]:
-    """run_dir の <name>.jsonl（無ければ <name>.csv）を読む。どちらも無ければ空。"""
+    """run_dir の <name>.jsonl（無ければ <name>.csv）を読む。どちらも無ければ空。
+
+    旧名（prs 列・D+DZ+PRS など）の行は RPS の名前に読み替える（新旧の実行をまとめても列と方式名がそろうように）。
+    """
     jsonl, csv_path = run_dir / f"{name}.jsonl", run_dir / f"{name}.csv"
     if jsonl.exists():
         with open(jsonl, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
-    if csv_path.exists():
+            rows = [json.loads(line) for line in f if line.strip()]
+    elif csv_path.exists():
         with open(csv_path, newline="", encoding="utf-8") as f:
-            return list(csv.DictReader(f))
-    return []
+            rows = list(csv.DictReader(f))
+    else:
+        return []
+    return [upgrade_legacy_rps_row(r) for r in rows]
 
 
 def group_members(group_dir: Path) -> list[Path]:
