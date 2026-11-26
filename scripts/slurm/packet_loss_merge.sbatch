@@ -2,7 +2,8 @@
 # =====================================================================
 # packet_loss.sbatch の配列ジョブが全て終わったあとに、結果を 1 つにまとめて図を作るジョブスクリプト。
 #   packet_loss.sbatch が自動で投げる（--dependency=afterany:<配列ジョブ ID>）ので、ふつうは手で投げなくてよい。
-#   OUT（runs/<設定ファイル名>_<配列ジョブ ID>）の下のモデルごとのフォルダをまとめ、OUT に
+#   同時に複数動いても、flock で 1 つずつ順にまとめる（GPU の無いノードで投げ直したジョブもまとめを投げるため）。
+#   OUT（runs/<設定ファイル名>_<配列ジョブ ID>）の下の条件（モデルと分割点）ごとのフォルダをまとめ、OUT に
 #   results.csv / gop_curve.csv（と .jsonl, sources.txt）、OUT/figures/ に図と summary.md を作る。
 #
 #   手で投げ直す場合（あとから再開したモデルの分を足すときなど）:
@@ -35,6 +36,16 @@ echo "=== $(date '+%F %T') まとめ: ${OUT}（ジョブ ${SLURM_JOB_ID:-なし}
 export ALLOW_CPU=1
 source scripts/slurm/activate_venv.sh "$VENV" scripts/slurm/packet_loss_merge.sbatch
 
-python scripts/merge_results.py --group "$OUT"
-python scripts/packet_loss_plot.py "$OUT"
+# まとめ用のジョブが同時に 2 つ動くと（GPU の無いノードで投げ直したジョブもまとめを投げるので起こり得る）、
+# merge_results.py が同じファイルに追記し合って行が重複する。flock で 1 つずつ順に動かす（後のジョブは前のが終わるまで待つ）
+merge() {
+    python scripts/merge_results.py --group "$OUT"
+    python scripts/packet_loss_plot.py "$OUT"
+}
+if command -v flock > /dev/null; then
+    mkdir -p "$OUT"
+    exec 9> "${OUT}/.merge.lock"
+    flock 9
+fi
+merge
 echo "=== $(date '+%F %T') 終了: ${OUT}/results.csv, ${OUT}/figures/"

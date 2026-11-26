@@ -18,7 +18,8 @@
 #     EXTRA     verify_shiba.py にそのまま渡す追加の引数（空白区切り。例: "--quick" / "--num-clips 2"）
 #     VENV      有効にする仮想環境（既定 .venv。scripts/slurm/setup_env.sh で作ったもの）
 #     DRY_RUN   1 にすると実行するコマンドを表示するだけで終わる（スクリプトの確認用）
-#     ALLOW_CPU 1 にすると、GPU が使えないノードでも CPU で実行する（既定では GPU が無ければエラーで止まる）
+#     ALLOW_CPU 1 にすると、GPU が使えないノードでも CPU で実行する（既定では GPU が無ければ、そのノードを外して
+#               同じ番号のジョブを自動で投げ直し、このジョブはエラーで終わる。3 回まで。scripts/slurm/activate_venv.sh を参照）
 #
 #   配列の番号と条件: 0-2 EfficientNetV2-S S3/S4/S6, 3-5 ResNet-50 L1/L2/L3, 6-8 VGG-16 9/16/23,
 #   9-11 MobileNetV2 S4/S14/S17（src/splitcomp/temporal/paper_values.py の TARGETS の順）
@@ -42,6 +43,8 @@ TASK="${SLURM_ARRAY_TASK_ID:-0}"
 OUT="${OUT:-runs/verify_shiba_${SLURM_ARRAY_JOB_ID:-local}}"
 EXTRA="${EXTRA:-}"
 VENV="${VENV:-.venv}"
+# GPU の無いノードで投げ直したジョブ（sbatch --export=ALL）が同じフォルダ・同じ引数で動くように、環境変数として引き継ぐ
+export OUT EXTRA VENV
 
 set -f
 read -ra extra_args <<< "$EXTRA"

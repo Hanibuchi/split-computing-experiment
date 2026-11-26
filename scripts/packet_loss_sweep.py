@@ -31,7 +31,7 @@ tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 の�
 メインプロセスの torch の CPU スレッド数（head の計算用）は、ジョブに割り当てられたコア数を超えないように調整する。
 
 出力（runs/<実験名>_<日時>/。--target で絞った場合は runs/<実験名>_<モデル名>_<日時>/。
---group-dir DIR を指定した場合は DIR/<モデル名>/（--target なしなら DIR/all/）。Slurm の配列ジョブで全モデルを 1 つのフォルダにまとめる用）:
+--group-dir DIR を指定した場合は DIR/<モデル名>_<分割点>/（--target なしなら DIR/all/）。Slurm の配列ジョブで全条件を 1 つのフォルダにまとめる用）:
     results.csv    条件ごとの集計（agreement, 95% CI, 特徴 MSE, 実際の損失率, 送信量, エントロピー ...）
                    送信量（packets_per_frame, bytes_per_frame）は、量子化インデックスをパケットごとに独立した
                    適応算術符号で符号化したときの値（splitcomp.temporal.packet.entropy_layout）
@@ -66,9 +66,9 @@ tail のデバイスが cpu 以外（cuda / mps）のときと --workers 1 の�
     # 途中で止まった実行を再開する
     python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20261013-120000
 
-    # 全モデルの結果を 1 つのフォルダ（runs/my_group/<モデル名>/）に入れる。同じコマンドをもう一度実行すると続きから再開する
+    # 全条件の結果を 1 つのフォルダ（runs/my_group/<モデル名>_<分割点>/）に入れる。同じコマンドをもう一度実行すると続きから再開する
     # （Slurm の scripts/slurm/packet_loss.sbatch はこれを使う。まとめは python scripts/merge_results.py --group runs/my_group）
-    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50 --group-dir runs/my_group
+    python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50/layer2 --group-dir runs/my_group
 
     # ワーカー数を指定する（1 にするとワーカーを使わず 1 プロセスで動かす）
     python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101_quick.yaml --workers 16
@@ -512,14 +512,29 @@ def target_name(target) -> str:
 
 
 def group_member_dir(group_dir: Path, targets: list, selected: bool) -> Path:
-    """--group-dir のときの実行フォルダ: group_dir/<モデル名>（--target で絞っていなければ group_dir/all）。
+    """--group-dir のときの実行フォルダ: group_dir/<モデル名>_<分割点>（--target で絞っていなければ group_dir/all）。
 
-    Slurm の配列ジョブでは、各ジョブがモデル 1 つずつを同じ group_dir の下の別々のフォルダに書く。
+    Slurm の配列ジョブでは、各ジョブが target（モデルと分割点の組）1 つずつを同じ group_dir の下の別々のフォルダに書く。
     ファイルを共有しないので、ジョブ同士で書き込みがぶつからない。
+    同じモデルの分割点が複数ある（論文の 12 条件）ので、フォルダ名には分割点も入れる。target が複数なら + でつなぐ。
+
+    以前の形式（group_dir/<モデル名>、モデル名だけのフォルダ）があり、その config.yaml の targets が
+    選んだ targets と同じなら、そのフォルダを返す（以前の実行の続きから再開できるように）。
     """
+    group_dir = Path(group_dir)
     if not selected:
-        return Path(group_dir) / "all"
-    return Path(group_dir) / "+".join(dict.fromkeys(t.model.name for t in targets))
+        return group_dir / "all"
+    names = [target_name(t) for t in targets]
+    legacy = group_dir / "+".join(dict.fromkeys(t.model.name for t in targets))
+    if (legacy / "config.yaml").exists():
+        try:
+            old_names = [target_name(t) for t in load_config(PacketLossConfig, legacy / "config.yaml", []).targets]
+        except Exception as e:  # 読めない config.yaml のせいで、関係の無い条件の実行まで止めない
+            print(f"警告: {legacy / 'config.yaml'} が読めないので、以前の形式のフォルダとしては使いません: {e}")
+            old_names = None
+        if old_names == names:
+            return legacy
+    return group_dir / "+".join(n.replace("/", "_") for n in names)
 
 
 def select_targets(targets: list, names: list[str] | None) -> list:
@@ -669,7 +684,7 @@ def main() -> None:
             "--group-dir",
             type=Path,
             metavar="DIR",
-            help="実行フォルダを DIR/<モデル名>（--target なしなら DIR/all）にする。Slurm の配列ジョブで全モデルの結果を 1 つのフォルダに"
+            help="実行フォルダを DIR/<モデル名>_<分割点>（--target なしなら DIR/all）にする。Slurm の配列ジョブで全条件の結果を 1 つのフォルダに"
             "まとめるため。そのフォルダが既にあれば、続きから再開する（設定はそのフォルダの config.yaml を使う）",
         )
         p.add_argument(
@@ -696,7 +711,7 @@ def main() -> None:
     if args.group_dir and not args.resume:
         group_run_dir = group_member_dir(args.group_dir, cfg.targets, bool(args.target))
         if (group_run_dir / "config.yaml").exists():
-            # 同じ配列ジョブのフォルダに投げ直した（時間切れ・失敗したモデルのやり直し）: 続きから再開する
+            # 同じ配列ジョブのフォルダに投げ直した（時間切れ・失敗した条件のやり直し）: 続きから再開する
             # 投げ直すときに前と同じ EXTRA（key=value の上書き）を付けても止まらないように、devices.* 以外の上書きは無視する
             ignored = [o for o in args.overrides if not o.startswith("devices.")]
             print(

@@ -138,7 +138,8 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
 
 ### メイン実験の設定方針（`configs/packet_loss_ucf101.yaml`）
 
-- **論文と同じにする項目**: モデルと分割点（Fig.5 の代表 4 条件: EfficientNetV2-S/S4, ResNet-50/L2, VGG16/16, MobileNetV2/S14）、
+- **論文と同じにする項目**: モデルと分割点（Table 3 の 12 条件: EfficientNetV2-S の S3/S4/S6、ResNet-50 の L1/L2/L3、VGG16 の 9/16/23、MobileNetV2 の S4/S14/S17。
+  Fig.5 の代表 4 条件 S4/L2/16/S14 を含む。形状が Table 3 と一致することは確認済み）、
   UCF-101 の 30 本（著者提供のクリップと開始フレーム）、30 フレーム（30fps）、GoP 30、ビット数 2/4/6/8（Table 8）、
   θ = 0、範囲 R = P99、方式 F+Sym / D+Sym / D+DZ
 - **自分で決めた項目**: パケットロスのモデルと率（論文はパケットロスを扱っていない）。
@@ -191,13 +192,14 @@ Video Streams"（IEEE Access 2026）の方式を、パケットロスのある�
   速い GPU に重いモデル（vgg16, resnet50）を割り当てる。CPU コアは 2 プロセスで分け合うことになる:
 
   ```bash
+  # モデル名で指定すると、そのモデルの分割点 3 つ全てになる
   python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target resnet50 --target vgg16 devices.head=cuda:0 devices.tail=cuda:0
   python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --target efficientnet_v2_s --target mobilenet_v2 devices.head=cuda:1 devices.tail=cuda:1
   ```
 
   どちらが `cuda:0` かは `nvidia-smi` で確認する（`CUDA_DEVICE_ORDER=PCI_BUS_ID` を付けると `nvidia-smi` と同じ番号になる）
 
-時間制限のある計算機（時間を指定して借りる JupyterLab など）では、モデルごとに別々に実行して、あとでまとめる:
+時間制限のある計算機（時間を指定して借りる JupyterLab など）では、モデルごと（そのモデルの分割点 3 つ）に別々に実行して、あとでまとめる:
 
 ```bash
 python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --list-targets   # 番号と名前を確認
@@ -208,7 +210,7 @@ python scripts/packet_loss_sweep.py --config configs/packet_loss_ucf101.yaml --t
 python scripts/merge_results.py runs/packet_loss_ucf101_*_2026* -o runs/packet_loss_ucf101_merged
 ```
 
-- `--target` にはモデル名・`モデル名/分割点`・番号のどれでも指定できる。複数回付けると、その分だけまとめて実行する
+- `--target` にはモデル名・`モデル名/分割点`・番号のどれでも指定できる。モデル名はそのモデルの分割点全て（3 つ）に当たる。複数回付けると、その分だけまとめて実行する
 - 結果は `runs/packet_loss_ucf101_<モデル名>_<日時>/` に出る
 - `merge_results.py` は、各フォルダの `results` / `gop_curve` を 1 つにまとめる。同じモデルの結果が複数あるときは、新しい実行のほうを使う
 - `*.jsonl` はモデル 1 つ分が終わるたびに追記される。途中で止まった実行（CSV が無いもの）でも、終わったモデルの分はまとめられる
@@ -230,7 +232,7 @@ python scripts/packet_loss_sweep.py --resume runs/packet_loss_ucf101_resnet50_20
 
 ### 研究室の Slurm クラスタで動かす
 
-`scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 4 モデルを別々のジョブとして並列に実行できる。
+`scripts/slurm/packet_loss.sbatch` を使うと、配列ジョブで 12 条件（モデルと分割点の組）を別々のジョブとして並列に実行できる（配列 0-11）。
 結果は全ての配列のジョブで 1 つのフォルダ `runs/<設定ファイル名>_<配列ジョブ ID>/` に入り、全部終わると自動でまとめと作図まで行う（下の 5）。
 GPU パーティション（`-p GPU`）・12 コア・時間制限 2 日（GPU パーティションの上限）で投げる。方式は、python で直接実行するときと同じく設定の `schemes` が全て実行される。絞るときは `SCHEMES="F+Sym D+DZ"` のように名前を並べる（`--scheme` に当たる）。
 以下はすべてログインノード上で、リポジトリのトップで行う（ホームは計算ノードと共有されているので、
@@ -251,49 +253,68 @@ uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで
    mkdir -p runs/slurm                # ジョブのログの出力先（Slurm は作ってくれない）
    ```
 
-2. 動作確認（target 1 番 = resnet50 を、クリップ 2 本・シード 1 個で）:
+2. 動作確認（target 4 番 = resnet50/layer2 を、クリップ 2 本・シード 1 個で）:
 
    ```bash
-   EXTRA="data.kwargs.num_clips=2 seeds=[0]" sbatch --array=1 scripts/slurm/packet_loss.sbatch
+   EXTRA="data.kwargs.num_clips=2 seeds=[0]" sbatch --array=4 scripts/slurm/packet_loss.sbatch
    squeue -u $USER                          # ST が R なら実行中、PD なら待ち
-   cat runs/slurm/packet_loss_*_1.out       # 使ったノード・GPU・結果の表
+   cat runs/slurm/packet_loss_*_4.out       # 使ったノード・GPU・結果の表
    ```
 
    `.out` の最初のほうに `CPU スレッド数: 12` と `デバイス: head=cuda, tail=cuda` のように出る。
    スレッド数が 1 なら `-c` が効いていない。
    GRES が未設定なので、GPU は同じノードの他のジョブと共有になることがある（`nvidia-smi` の出力で使用状況が分かる）
 
-3. 本番（4 モデルを並列に）:
+3. 本番（12 条件を並列に）:
 
    ```bash
    sbatch scripts/slurm/packet_loss.sbatch
    tail -f runs/slurm/packet_loss_<ジョブID>_*.err   # 進捗バー
    ```
 
-   結果は `runs/packet_loss_ucf101_<ジョブID>/<モデル名>/` に入る（設定ファイルが `configs/packet_loss_ucf101_qfixed.yaml` なら
-   `runs/packet_loss_ucf101_qfixed_<ジョブID>/`）。モデルごとに別のフォルダに書くので、ジョブ同士で書き込みがぶつからない
+   結果は `runs/packet_loss_ucf101_<ジョブID>/<モデル名>_<分割点>/`（例 `resnet50_layer2/`）に入る（設定ファイルが
+   `configs/packet_loss_ucf101_qfixed.yaml` なら `runs/packet_loss_ucf101_qfixed_<ジョブID>/`）。条件ごとに別のフォルダに書くので、
+   ジョブ同士で書き込みがぶつからない。以前の版で作ったモデル名だけのフォルダ（`<モデル名>/`）も、同じ条件ならそのまま再開できる
 
-   ノードの GPU が PyTorch から使えないときは、止まらずに **CPU で続ける**（`.out` に `警告: <ノード名> では GPU が使えません。ALLOW_CPU=1 なので CPU で実行します`）。
+   ノードの GPU が PyTorch から使えないときは、**CPU では走らせず、そのノードを外して同じジョブを自動で投げ直す**
+   （`scripts/slurm/activate_venv.sh`）。CPU だと何倍も遅く、2 日の制限に収まらないことがあるため
+   （run 16450 の vgg16 は GPU の使えない xylophone1 に当たって CPU で走り、終わらなかった）。
    例えば NVIDIA ドライバの更新後にノードを再起動していない場合は、`nvidia-smi` が `Driver/library version mismatch` になってこうなる
-   （管理者に再起動を頼む）。CPU では tail も CPU になり、`-c` のコア数（12）のワーカープロセスで並列に処理するが、GPU より遅い。
-   2 日の制限で切れたら、下の 4 の方法で続きから再開できる。
-   GPU のノードだけで動かしたいときは、そのノードを外して投げるか、`ALLOW_CPU=0` で GPU が無ければエラーで止まるようにする。
-   各ノードで GPU が使えるかは `srun` で確かめられる:
+   （管理者に再起動を頼む）。`.err` に次のように出て、元のジョブはエラーで終わる:
+
+   ```
+   エラー: xylophone1 では PyTorch から GPU が使えません（上の nvidia-smi の出力を確認）。
+     このノードを外して投げ直します（残り 2 回）: sbatch --parsable --exclude=xylophone1 --export=ALL --array=7 -p GPU scripts/slurm/packet_loss.sbatch
+     投げ直したジョブ: 12399（外したノード: xylophone1）
+   ```
+
+   - 投げ直したジョブは、同じ番号・同じ設定（`CONFIG` / `SCHEMES` / `EXTRA`）・同じフォルダ（`OUT`）で動く。環境変数は全て引き継ぐ
+   - 外したノードは `EXCLUDE_NODES` に溜まっていくので、GPU の使えないノードが複数あっても、同じノードには二度当たらない
+   - 投げ直しは 3 回まで（`RESUBMIT_LEFT`、既定 3）。使い切ると、`--exclude` を付けて手で投げ直す方法を表示して止まる
+   - 引き継ぐのは番号・パーティション・外したノード・環境変数だけ。sbatch のコマンドラインで付けたオプション（`-c` `-t` `-w` など）は
+     引き継がず、ジョブスクリプトの `#SBATCH` の既定値に戻る
+   - 投げ直したジョブも、GPU の確認が通ったら、元の配列ジョブと自分が終わってから動くまとめ用のジョブを投げる（下の 5）。
+     まとめ用のジョブどうしは `flock` で 1 つずつ順に動き、何度やっても同じ結果になるので、
+     元の配列ジョブのまとめが先に動いて一部だけになっても、最後のまとめで全条件がそろう
+   - CPU で続けてよいときは `ALLOW_CPU=1`（tail も CPU になり、`-c` のコア数（12）のワーカープロセスで並列に処理する）
+   - 最初から外しておきたいノードがあれば `--exclude` を付けて投げる。各ノードで GPU が使えるかは `srun` で確かめられる:
 
    ```bash
    srun -p GPU -w <ノード名> nvidia-smi                         # GPU の一覧が出れば使える
    sbatch --exclude=<ノード名> scripts/slurm/packet_loss.sbatch   # 複数外すときは --exclude=<ノード名1>,<ノード名2>
-   ALLOW_CPU=0 sbatch scripts/slurm/packet_loss.sbatch           # GPU が使えないノードではエラーで止める
+   ALLOW_CPU=1 sbatch scripts/slurm/packet_loss.sbatch           # GPU が使えないノードでも CPU で続ける
    ```
 
 4. 2 日の制限で切れた（`.err` に `DUE TO TIME LIMIT`）り、ノードの不調で失敗したりしたら、同じフォルダを `OUT=` で指定して、同じ番号で投げ直す:
 
    ```bash
-   OUT=runs/packet_loss_ucf101_12345 sbatch --array=2 scripts/slurm/packet_loss.sbatch
+   OUT=runs/packet_loss_ucf101_12345 sbatch --array=7 scripts/slurm/packet_loss.sbatch
    ```
 
-   そのモデルのフォルダが既にあれば続きから再開する（設定はそのフォルダの config.yaml を使い、`CONFIG` / `SCHEMES` / `EXTRA` の key=value は無視する）。
+   その条件のフォルダが既にあれば続きから再開する（設定はそのフォルダの config.yaml を使い、`CONFIG` / `SCHEMES` / `EXTRA` の key=value は無視する）。
    まだ無ければ最初から計算する。投げ直した分が終わると、まとめも自動でやり直す。
+   番号は今の設定の番号（`--list-targets`）。以前の 4 条件の設定で作ったフォルダ（例 run 16450）を 12 条件の設定で再開するときは、
+   番号が変わっている（resnet50/layer2 は以前 1、今は 4）ので注意する。違う番号を付けると、別の条件のフォルダが新しくできる
    以前の形式（`runs/<実験名>_<モデル名>_<日時>/`）の実行フォルダは、これまでどおり `RESUME=<実行フォルダ>` で再開する
 
 5. まとめと作図は自動で行う。配列の中で番号が一番小さいジョブが、配列のジョブが全て終わってから動くジョブ
@@ -301,13 +322,13 @@ uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで
 
    ```
    runs/packet_loss_ucf101_<ジョブID>/
-   ├── efficientnet_v2_s/ resnet50/ vgg16/ mobilenet_v2/   モデルごとの実行フォルダ（--resume もこのまま使える）
-   ├── results.csv, gop_curve.csv（と .jsonl）               全モデル分をまとめたもの
-   ├── sources.txt                                          各モデルをどのフォルダから取ったか
-   └── figures/                                             packet_loss_plot.py の図と summary.md
+   ├── efficientnet_v2_s_features_3/ … mobilenet_v2_features_17/   条件ごとの実行フォルダ（12 個。--resume もこのまま使える）
+   ├── results.csv, gop_curve.csv（と .jsonl）                       全条件分をまとめたもの
+   ├── sources.txt                                                  各条件をどのフォルダから取ったか
+   └── figures/                                                     packet_loss_plot.py の図と summary.md（条件は論文の略称 Eff-S4, RN-L2 などで表し、論文の順に並べる）
    ```
 
-   - 失敗・時間切れのモデルがあっても、終わった分だけでまとめる
+   - 失敗・時間切れの条件があっても、終わった分だけでまとめる
    - 自動でまとめたくないときは `NO_MERGE=1`。計算ノードから sbatch を投げられない場合は、`.out` に警告が出るので手動でまとめる。
      手動でまとめるときは（ログインノードで実行してよい）:
 
@@ -319,8 +340,10 @@ uv は python 自体をホーム（`~/.local/share/uv/python/`、全ノードで
    - 別々に投げた実行フォルダをまとめるときは、これまでどおり `python scripts/merge_results.py <フォルダ...> -o <出力先>`
 
 - 設定ファイルは `CONFIG=configs/packet_loss_ucf101_quick.yaml` で変えられる（quick は target が 2 つなので `--array=0-1`）
-- 実行されるコマンドは `DRY_RUN=1 SLURM_ARRAY_TASK_ID=1 bash scripts/slurm/packet_loss.sbatch` で確認できる
+- 設定ファイルの target の数が 12 でないときは、`--array` をその数に合わせる（qfixed は 4 つなので `--array=0-3`）
+- 実行されるコマンドは `DRY_RUN=1 SLURM_ARRAY_TASK_ID=4 bash scripts/slurm/packet_loss.sbatch` で確認できる
 - 他の環境変数（`EXTRA` / `SCHEMES` / `OUT` / `NO_MERGE` / `VENV` / `ALLOW_CPU`）はスクリプトの先頭のコメントを参照
+  （`EXCLUDE_NODES` / `RESUBMIT_LEFT` は `scripts/slurm/activate_venv.sh` の先頭）
 
 使う動画（`selection: paper`、`src/splitcomp/data/ucf101.py` の `PAPER_CLIPS`）:
 - 論文の著者から提供された 30 本（動画名・開始フレーム・総フレーム数の参考値）。論文の実験と同じ入力になる
@@ -619,13 +642,13 @@ python scripts/qi_histogram.py --target resnet50 --bits 2 --clip 3 --out figs --
 - 統計（q・0 になった割合・エントロピー・範囲外の割合）の表を標準出力と `qi_summary_table.png` に出す
   （efficientnet_v2_s / features_4, 4 bit, クリップ 0 の例: エントロピーは D+DZ 3.04 → QI 1.19 bit/要素、0 の割合は 31% → 77%）
 
-Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 4 つなので、sbatch の既定の `--array=0-3` のまま）。
+Slurm クラスタでは、モデルごとに配列ジョブで動かします（target は 4 つなので `--array=0-3` を付ける。sbatch の既定は本番の 12 条件に合わせた 0-11）。
 以前の設定（7 方式 × 6 ビット数 = 42 組）は手元の Mac（8 コア）で resnet50 の 1 クリップに約 5 分かかったため、
 今は 4 方式 × 3 ビット数 = 12 組に絞っています。D+DZ+Cmax / D+DZ+QI2 / D+DZ+QI+RPS などは設定ファイルに例があり、方式を足せば比べられます。
 
 ```bash
 mkdir -p runs/slurm
-CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch scripts/slurm/packet_loss.sbatch
+CONFIG=configs/packet_loss_ucf101_qfixed.yaml sbatch --array=0-3 scripts/slurm/packet_loss.sbatch
 # 全て終わると、runs/packet_loss_ucf101_qfixed_<ジョブID>/ に全モデル分の results.csv と figures/ が自動でできる
 ```
 
