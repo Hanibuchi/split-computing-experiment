@@ -1,14 +1,17 @@
 """packet_loss_sweep の結果（results.csv / gop_curve.csv）を可視化し、要約表を書き出す。
 
 出力（既定は <run_dir>/figures/）:
-    agreement_vs_loss_<損失モデル>.png  損失率ごとの一致率（行=モデル、列=ビット数、線=方式）
+    agreement_vs_loss_<損失モデル>.png  損失率ごとの一致率（行=条件、列=ビット数、線=方式）
     agreement_drop_heatmap.png          ロスなしからの一致率の低下（モデル平均）
     dpcm_vs_fd.png                      D+DZ と F+Sym の一致率の差（0 を下回ると DPCM が負ける）
-    gop_curve_<モデル>.png              GoP 内の位置ごとの一致率と特徴 MSE（ロスの伝搬）
+    gop_curve_<条件>.png                GoP 内の位置ごとの一致率と特徴 MSE（ロスの伝搬）
     rate_vs_agreement.png               送信量（パケットごとにエントロピー符号化した実際の送信量）と一致率
     loss_rate_check.png                 指定した損失率と実際のパケット損失率
     clamp_rate.png                      ロスなしで、P フレームのインデックスが範囲の端に飽和した割合（列 clamp_rate がある結果のみ）
     summary.md                          ロスなしの表、損失モデル別の表、DPCM が FD を下回る損失率
+
+図と表は「条件」（モデルと分割点の組）ごとに分ける。論文の 12 条件は略称（Eff-S4, RN-L2, VGG-16, MN-S14 など）で表し、
+論文 Table 3 の順に並べる（表の model 列も、この略称になる）。
 
 例:
     python scripts/packet_loss_plot.py runs/packet_loss_ucf101_merged
@@ -30,6 +33,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 from splitcomp.config import upgrade_legacy_rps_name  # noqa: E402
+from splitcomp.temporal.paper_values import KEYS, LABEL  # noqa: E402
 
 # 方式の表示順と色・マーカー（すべての図で共通）。結果に無い方式は main で除く
 SCHEMES = ["F+Sym", "D+Sym", "D+DZ", "D+DZ+R", "D+DZ+S2", "D+DZ+S5", "D+DZ+RPS", "D+DZ+RPS3", "D+DZ+FEC10", "D+DZ+FEC25",
@@ -98,11 +102,36 @@ def load(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame | None]:
         gop["scheme"] = gop["scheme"].map(upgrade_legacy_rps_name)
         loss_map = df[["loss", "loss_model", "loss_p"]].drop_duplicates("loss")
         gop = gop.merge(loss_map, on="loss", how="left")
+    # 同じモデルに分割点が複数ある（論文の 12 条件）ので、以降の図と表は「条件」（モデルと分割点の組）ごとにまとめる。
+    #   model 列を条件の名前（論文の略称 RN-L2 など）に置き換え、論文の順に並べる
+    df = label_conditions(df)
+    if gop is not None:
+        gop = label_conditions(gop)
     return df, gop
 
 
+def condition_label(model: str, split_point: str) -> str:
+    """条件（モデルと分割点の組）の表示名。論文の 12 条件は略称（Eff-S4, RN-L2 など）、それ以外は「モデル/分割点」。"""
+    return LABEL.get((model, split_point), f"{model}/{split_point}")
+
+
+def label_conditions(df: pd.DataFrame) -> pd.DataFrame:
+    """model 列を条件の表示名に置き換え、論文の 12 条件の順（それ以外はその後ろ、出てきた順）に並べ替える。
+
+    元のモデル名は model_name 列に残す。
+    """
+    order = {k: i for i, k in enumerate(KEYS)}
+    keys = list(zip(df["model"], df["split_point"]))
+    rank = [order.get(k, len(order)) for k in keys]
+    df = df.assign(model_name=df["model"], model=[condition_label(*k) for k in keys], _rank=rank)
+    df = df.sort_values("_rank", kind="stable").drop(columns="_rank").reset_index(drop=True)
+    # 順序付きのカテゴリにして、pivot_table などの表でもアルファベット順ではなく論文の順に並ぶようにする
+    df["model"] = pd.Categorical(df["model"], categories=list(dict.fromkeys(df["model"])), ordered=True)
+    return df
+
+
 def models_of(df: pd.DataFrame) -> list[str]:
-    """モデル名（実行に現れた順）。"""
+    """条件の表示名（load で model 列に入れたもの。論文の順）。"""
     return list(dict.fromkeys(df["model"]))
 
 
@@ -161,7 +190,7 @@ def plot_drop_heatmap(df: pd.DataFrame, out_dir: Path) -> None:
     order = (lossy[["loss", "loss_model", "loss_p"]].drop_duplicates()
              .assign(k=lambda x: x.loss_model.map(LOSS_MODELS.index)).sort_values(["k", "loss_p"])["loss"].tolist())
     bits_list = sorted(df.bits.unique())
-    tables = [lossy[lossy.bits == b].pivot_table(index="scheme", columns="loss", values="agreement_drop")
+    tables = [lossy[lossy.bits == b].pivot_table(index="scheme", columns="loss", values="agreement_drop", observed=True)
               .reindex(index=SCHEMES, columns=order) for b in bits_list]
     vmax = max(np.nanmax(t.values) for t in tables)
     fig, axes = plt.subplots(len(bits_list), 1, figsize=(0.62 * len(order) + 2, 1.5 * len(bits_list) + 1.2),
@@ -190,7 +219,7 @@ def dpcm_minus_fd(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for m in LOSS_MODELS:
         sub = by_loss_model(df, m)
-        p = sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement")
+        p = sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement", observed=True)
         if not {"D+DZ", "F+Sym"} <= set(p.columns):
             continue
         d = (p["D+DZ"] - p["F+Sym"]).rename("diff").reset_index()
@@ -205,7 +234,7 @@ def crossover_table(diff: pd.DataFrame) -> pd.DataFrame:
         below = g[g["diff"] < 0].loss_p
         return below.min() if not below.empty else np.nan
 
-    t = diff.groupby(["model", "bits", "loss_model"]).apply(first_below, include_groups=False).unstack("loss_model")
+    t = diff.groupby(["model", "bits", "loss_model"], observed=True).apply(first_below, include_groups=False).unstack("loss_model")
     return t.reindex(columns=[m for m in LOSS_MODELS if m in t.columns])
 
 
@@ -262,7 +291,7 @@ def plot_gop_curves(gop: pd.DataFrame, out_dir: Path, bits: int) -> None:
         fig.suptitle(f"Loss propagation within a GoP — {model}, {bits} bit", y=1.04)
         scheme_legend(fig)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
-        save(fig, out_dir / f"gop_curve_{model}.png")
+        save(fig, out_dir / f"gop_curve_{model.replace('/', '_')}.png")  # 「モデル/分割点」の / はファイル名に使えない
 
 
 def plot_rate_vs_agreement(df: pd.DataFrame, out_dir: Path, lossy: str = "bernoulli(p=0.05)") -> None:
@@ -360,17 +389,17 @@ def write_summary(df: pd.DataFrame, diff: pd.DataFrame, run_dir: Path, path: Pat
     clean = df[df.loss_p == 0]
     parts = [f"# packet loss 実験の要約: `{run_dir}`", ""]
     parts += ["## ロスなし（loss_p = 0）の一致率", "", "論文 Table 8 の FD（F+Sym）/ DPCM（D+Sym）と比べる（Table 8 は論文の式 (9) どおり P フレームの q を毎フレーム決め直す設定なので、p_step: intra の結果とは完全には一致しない）。", "",
-              md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="agreement")
+              md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="agreement", observed=True)
                        .reindex(columns=SCHEMES)), ""]
     parts += ["## ロスなしのエントロピー [bit/要素]", "",
-              md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="entropy_bpe")
+              md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="entropy_bpe", observed=True)
                        .reindex(columns=SCHEMES)), ""]
     parts += ["## ロスなしの送信量 [KB/frame]（パケットごとにエントロピー符号化、ヘッダ込み）", "",
-              md_table((clean.pivot_table(index=["model", "bits"], columns="scheme", values="bytes_per_frame") / 1024)
+              md_table((clean.pivot_table(index=["model", "bits"], columns="scheme", values="bytes_per_frame", observed=True) / 1024)
                        .reindex(columns=SCHEMES), digits=1), ""]
     if "clamp_rate" in clean:
         parts += ["## ロスなしの P フレームの飽和率（インデックスが ±2^(b−1) の端になった要素の割合）", "",
-                  md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="clamp_rate")
+                  md_table(clean.pivot_table(index=["model", "bits"], columns="scheme", values="clamp_rate", observed=True)
                            .reindex(columns=[s for s in SCHEMES if s != "F+Sym"]), digits=4), ""]
     parts += ["## D+DZ が F+Sym を下回り始める損失率", "",
               "空欄は、評価した範囲では下回らなかったことを表す。", ""]
@@ -381,7 +410,7 @@ def write_summary(df: pd.DataFrame, diff: pd.DataFrame, run_dir: Path, path: Pat
         if sub.loss_p.max() == 0:
             continue
         parts += [f"## 一致率: {LOSS_MODEL_LABEL[m]}", "",
-                  md_table(sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement")
+                  md_table(sub.pivot_table(index=["model", "bits", "loss_p"], columns="scheme", values="agreement", observed=True)
                            .reindex(columns=SCHEMES)), ""]
     path.write_text("\n".join(parts), encoding="utf-8")
     print(f"  {path}")

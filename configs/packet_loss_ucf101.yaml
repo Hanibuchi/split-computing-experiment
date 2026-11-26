@@ -7,7 +7,7 @@
 #   動作確認: ... data.kwargs.num_clips=2 'seeds=[0]'
 #
 # 設定の方針（メイン実験）:
-#   - 論文と同じにする項目: モデルと分割点（Fig.5 の代表 4 条件）・UCF-101 の 30 本（著者提供の開始フレーム）・
+#   - 論文と同じにする項目: モデルと分割点（Table 3 の 12 条件）・UCF-101 の 30 本（著者提供の開始フレーム）・
 #     30 フレーム（30fps）・GoP 30・ビット数 2/4/6/8（Table 8）・θ = 0・範囲 R = P99・方式 F+Sym / D+Sym / D+DZ
 #     （P フレームの q は p_step: intra なので、ロスなしの一致率は Table 8（論文の式 (9) どおり q を毎フレーム決め直す設定）と完全には一致しない）
 #   - 自分で決めた項目: パケットロスのモデルと率（論文はパケットロスを扱っていない）。
@@ -19,12 +19,21 @@ experiment_name: packet_loss_ucf101
 output_dir: runs
 seed: 0
 
-# 論文 Fig.5 の代表 4 条件（形状は論文 Table 3 と同じ）
+# 論文 Table 3 の 12 条件（4 モデル × 3 分割点。形状も Table 3 と同じ。Fig.5 の代表 4 条件は S4 / L2 / 16 / S14）
+#   配列ジョブの番号 = この並びの番号（0〜11）。名前は src/splitcomp/temporal/paper_values.py の TARGETS と同じ
 targets:
-  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_4}   # S4: 128x14x14
-  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # L2: 512x28x28
-  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 16: 256x28x28
-  - {model: {name: mobilenet_v2, pretrained: true, trace_depth: 2}, split_point: features_14}       # S14: 160x7x7
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_3}   # 0  S3: 64x28x28
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_4}   # 1  S4: 128x14x14
+  - {model: {name: efficientnet_v2_s, pretrained: true, trace_depth: 2}, split_point: features_6}   # 2  S6: 256x7x7
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer1}                 # 3  L1: 256x56x56
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # 4  L2: 512x28x28
+  - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer3}                 # 5  L3: 1024x14x14
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_9}               # 6  9: 128x56x56
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 7  16: 256x28x28
+  - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_23}              # 8  23: 512x14x14
+  - {model: {name: mobilenet_v2, pretrained: true, trace_depth: 2}, split_point: features_4}        # 9  S4: 32x28x28
+  - {model: {name: mobilenet_v2, pretrained: true, trace_depth: 2}, split_point: features_14}       # 10 S14: 160x7x7
+  - {model: {name: mobilenet_v2, pretrained: true, trace_depth: 2}, split_point: features_17}       # 11 S17: 320x7x7
 
 data:
   name: ucf101

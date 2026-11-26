@@ -7,7 +7,7 @@
 例:
     python scripts/merge_results.py runs/packet_loss_ucf101_*_2026* -o runs/packet_loss_ucf101_merged
 
-    # Slurm の配列ジョブ（packet_loss_sweep.py --group-dir）の結果: フォルダの下のモデルごとのフォルダを、そのフォルダ自体にまとめる
+    # Slurm の配列ジョブ（packet_loss_sweep.py --group-dir）の結果: フォルダの下の条件（モデルと分割点）ごとのフォルダを、そのフォルダ自体にまとめる
     python scripts/merge_results.py --group runs/packet_loss_ucf101_12345
 """
 

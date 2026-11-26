@@ -727,6 +727,46 @@ def test_select_targets():
         sweep.select_targets(targets, ["mobilenet_v2"])
 
 
+def test_group_member_dir(tmp_path):
+    """--group-dir の実行フォルダは「モデル名_分割点」。同じモデルの分割点どうしでぶつからない。以前の形式でも再開できる。"""
+    from splitcomp.config import ModelConfig, PacketLossConfig, SplitTarget, to_dict
+
+    sweep = _load_script("packet_loss_sweep")
+    l2 = SplitTarget(ModelConfig(name="resnet50"), "layer2")
+    l3 = SplitTarget(ModelConfig(name="resnet50"), "layer3")
+    assert sweep.group_member_dir(tmp_path, [l2], True) == tmp_path / "resnet50_layer2"
+    assert sweep.group_member_dir(tmp_path, [l3], True) == tmp_path / "resnet50_layer3"
+    assert sweep.group_member_dir(tmp_path, [l2, l3], True) == tmp_path / "resnet50_layer2+resnet50_layer3"
+    assert sweep.group_member_dir(tmp_path, [l2, l3], False) == tmp_path / "all"
+
+    # 以前の形式（モデル名だけのフォルダ）: config.yaml の targets が同じときだけ、そのフォルダで再開する
+    import yaml
+
+    legacy = tmp_path / "resnet50"
+    legacy.mkdir()
+    (legacy / "config.yaml").write_text(yaml.safe_dump(to_dict(PacketLossConfig(targets=[l2]))))
+    assert sweep.group_member_dir(tmp_path, [l2], True) == legacy
+    assert sweep.group_member_dir(tmp_path, [l3], True) == tmp_path / "resnet50_layer3"
+
+
+def test_plot_label_conditions():
+    """図と表は条件（モデルと分割点）ごとに分け、論文の略称を付けて論文の順に並べる。"""
+    import pandas as pd
+
+    plot = _load_script("packet_loss_plot")
+    df = pd.DataFrame({
+        "model": ["mobilenet_v2", "resnet50", "resnet50", "efficientnet_v2_s", "mymodel"],
+        "split_point": ["features_14", "layer3", "layer1", "features_4", "block2"],
+    })
+    out = plot.label_conditions(df)
+    assert list(out["model"]) == ["Eff-S4", "RN-L1", "RN-L3", "MN-S14", "mymodel/block2"]
+    assert list(out["model_name"]) == ["efficientnet_v2_s", "resnet50", "resnet50", "mobilenet_v2", "mymodel"]
+    assert plot.models_of(out) == ["Eff-S4", "RN-L1", "RN-L3", "MN-S14", "mymodel/block2"]
+    # pivot_table でもアルファベット順ではなく論文の順になる
+    piv = out.assign(v=1.0).pivot_table(index="model", values="v", observed=True)
+    assert list(piv.index) == ["Eff-S4", "RN-L1", "RN-L3", "MN-S14", "mymodel/block2"]
+
+
 def test_select_schemes():
     from splitcomp.config import TemporalSchemeConfig
 

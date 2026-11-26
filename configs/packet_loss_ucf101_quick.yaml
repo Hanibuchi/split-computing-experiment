@@ -10,7 +10,7 @@
 base: packet_loss_ucf101.yaml
 experiment_name: packet_loss_ucf101_quick
 
-# 4 モデルのうち 2 つだけ（list は丸ごと置き換わる）
+# 本番の 12 条件のうち 2 つだけ（list は丸ごと置き換わる）
 targets:
   - {model: {name: resnet50, pretrained: true, trace_depth: 1}, split_point: layer2}                 # L2: 512x28x28
   - {model: {name: vgg16, pretrained: true, trace_depth: 2}, split_point: features_16}              # 16: 256x28x28
